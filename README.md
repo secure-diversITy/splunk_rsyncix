@@ -1,8 +1,25 @@
 # splunk_rsyncix
 
-A rsync script for migrating or syncing from a given source.
+Description:
 
-Very powerful and including a speedtester as well :)
+~~~
+This is an incredible powerful tool to sync LOCAL indices to remote destination(s)
+without increasing your splunk license.
+Basically this will act like the indexer cluster replication but: fully controllable.
+
+ Main purposes:
+       - duplicate your production data into a testing/staging env
+       - migrating from single indexer to a cluster
+       - migrating to another cluster
+       - backup
+
+ Q: Does this violate the splunk license? 
+ A: No. You will not re-index any data but instead clone the already existing data (which was counted against your license)
+
+ Ensure you read and fully understand all details in "--help".
+ Yes there is a lot to understand at first but once you had set everything up
+ you will see how flexible and powerful the whole thing is.
+~~~
 
 The following should give you an idea HOW powerful it is.
 
