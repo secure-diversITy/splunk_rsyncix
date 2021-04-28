@@ -1,11 +1,26 @@
 #!/bin/bash
 ##################################################################################################################################
 #
-# Sync LOCAL indices to remote destination (will REMOVE existing files @ DESTINATION!)
-# Author: Thomas Fischer <mail@sedi.one>
-# Copyright: 2017-2020 Thomas Fischer <mail@sedi.one>
+# Description:
+#       This is an incredible powerful tool to sync LOCAL indices to remote destination(s)
+#       without increasing your splunk license.
+#       Basically this will act like the indexer cluster replication but: fully controllable.
 #
-VERSION="5.3.12"
+# Main purposes:
+#       - duplicate your production data into a testing/staging env
+#       - backup
+#
+# Q: Does this violate the splunk license? 
+# A: No. You will not re-index any data but instead clone the already existing data (which was counted against your license)
+#
+# Ensure you read and fully understand all details in "--help".
+# Yes there is a lot to understand at first but once you had set everything up
+# you will see how flexible and powerful the whole thing is.
+#
+# Author & Support:     Thomas Fischer <mail@sedi.one>
+# Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
+#
+VERSION="6.0.6"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -57,7 +72,7 @@ SHELPER=/usr/local/bin/shelper
 
 # a list of tools required to run this script
 # check --help-install
-REQUIREDTOOLS="/usr/bin/bc $RSYNC /usr/bin/mail /usr/bin/ssh /usr/bin/scp $SHELPER"
+REQUIREDTOOLS="/usr/bin/bc $RSYNC /usr/bin/mail /usr/bin/ssh /usr/bin/scp $SHELPER /usr/bin/wget"
 
 # LOCAL(!) SPLUNK installation dir! Adjust to match your installation!
 # local = where you start this script.
@@ -220,7 +235,6 @@ MAXSLOG=10          # keep that amount of summaryinfo log files
 ARCHDIR=./${TOOL}_archive   # directory where to store rotated logs
 
 # splunk authentication credentials
-# these are usually better given on the CLI but you if you like to have it hard-coded here..
 # ensure you have read --help-install to know about the needed splunk user credentials and
 # where and when they are needed
 # format is: "<username>:<password>"
@@ -541,7 +555,7 @@ F_SPEED(){
         if [ "$cipher" == "hostdefault" ];then
             echo -e "\nUsing default cipher ($SPEEDROUNDS rounds):"
             for try in $(seq $SPEEDROUNDS); do
-                DDRES=$((dd if=$RNDDEV bs=$BSSIZE count=$TESTSIZE | ssh -o "Compression no" $SPEEDTARGET "cat - > $SAVELOCATION") 2>&1 | grep "MB/s" |cut -d "," -f 3 | cut -d " " -f 2)
+                DDRES="$((dd if=$RNDDEV bs=$BSSIZE count=$TESTSIZE | ssh -o "Compression no" $SPEEDTARGET "cat - > $SAVELOCATION") 2>&1 | grep "MB/s" |cut -d "," -f 3 | cut -d " " -f 2)"
                 echo "Current speed of this run: $DDRES MB/s"
                 F_CALC "scale=2;$ALLDDS+$DDRES"
                 ALLDDS="$CALCRESULT"
@@ -549,7 +563,7 @@ F_SPEED(){
         else
             echo -e "\nUsing $cipher ($SPEEDROUNDS rounds):"
             for try in $(seq $SPEEDROUNDS); do
-                DDRES=$((dd if=$RNDDEV bs=$BSSIZE count=$TESTSIZE | ssh -c $cipher -o "Compression no" $SPEEDTARGET "cat - > $SAVELOCATION") 2>&1 | grep "MB/s" |cut -d "," -f 3 | cut -d " " -f 2)
+                DDRES="$((dd if=$RNDDEV bs=$BSSIZE count=$TESTSIZE | ssh -c $cipher -o "Compression no" $SPEEDTARGET "cat - > $SAVELOCATION") 2>&1 | grep "MB/s" |cut -d "," -f 3 | cut -d " " -f 2)"
                 #echo "dd if=/dev/zero bs=$BSSIZE count=$TESTSIZE | ssh -c $cipher -o 'Compression no' $SPEEDTARGET 'cat - > $SAVELOCATION'"
                 echo "Current speed of this run: $DDRES MB/s"
                 F_CALC "scale=2;$ALLDDS+$DDRES"
@@ -647,6 +661,11 @@ F_HELPINSTALL(){
             
             - N/A no credentials or user required
 
+    4) SSH access:
+
+       Every source server needs password-less access (i.e. ssh-key) to every target server.
+       For this you need to put each server's pub key on every target server (~/.ssh/authorized_keys).
+
 
 
 EOHELPINS
@@ -672,7 +691,7 @@ F_HELPSPEED(){
    
    The following both options can be used EXCLUSIVELY only and they HAVE TO be the first argument!
         
-        -netspeed -s TARGETSERVER [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER]
+        -netspeed -s <target-server> [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER]
             Test your connection by transferring data without any disk I/O
             The amount of data will be transferred without any disk IO.
             It uses the logic: local /dev/zero --> remote /dev/null
@@ -701,7 +720,7 @@ F_HELPSPEED(){
                 3) arcfour      (usually requires sshd_config adjustment)
                 4) arcfour128   (usually requires sshd_config adjustment)
     
-        -filespeed -s TARGETSERVER -p STORAGE-PATH [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER ]
+        -filespeed -s <target-server> -p STORAGE-PATH [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER ]
         
             -p STORAGE-PATH
             The remote storage path where the test file should get written.
@@ -726,7 +745,7 @@ F_HELPSYNC(){
    $TOOL v${VERSION} USAGE / HELP for the sync process
    --------------------------------------------------------------
 
-    -y          This actually enables syncing. One of --ixdirmap or --ixmap is required, too
+    -y          This actually enables syncing.
                 (checkout the optional args if you want to override default options or starting in special modes).
     
     HINT: volume based index configuration is NOT supported yet!!!
@@ -751,57 +770,86 @@ F_HELPSYNC(){
     
     Sync: REQUIRED arguments
     --------------------------------------------------------------
-    
-    You have to choose one of the following to actually start syncing:
-    
-            --ixdirmap="<localdir,dbtype,remote-server:/remote/rootpath>"
-                                
-            The *ixdirmap* defines:
-                
-                    1) the local(!) directory you want to sync
-                    2) the db type which can be either one of: db, colddb or summary
-                    3) the remote SERVER where the local dir should be synced to (FQDN or IP)
-                    4) the remote DIR where the local dir should be synced to (without index name|so the root dir)
-                    
-            This whole thing is ultra flexible and you can specify more then 1 mapping, of course!
-            If you want to define more then 1 mapping just use space as delimeter and regardless
-            of one or multiple mappings always use QUOTES!
-     
-    or alternatively if you are lazy and want to autodetect the LOCAL index path name:
-    
-        ATTENTION:
-        ixmap is LEGACY and will not get any new features like GUID replacement etc. for this ixdirmap is needed.
-        ixmap might get removed in v6 or later so better switch to ixdirmap NOW!
-    
-            --ixmap="<indexname,dbtype,remote-server:/remote/rootpath>"
-                                
-            The *ixmap* defines:
-                    
-                    1) The local index name you want to sync
-                    2) the db type which can be either one of: db, colddb or summary                                    
-                    3) the remote SERVER where the local dir should be synced to (FQDN or IP)
-                    4) the remote DIR where the local index should be synced to (without index name|so the root dir)
-                    
-            This whole thing is ultra flexible and you can specify more then 1 mapping, of course!
-            If you want to define more then 1 mapping just use space as delimeter and regardless
-            of one or multiple mappings always use QUOTES!
-    
-    NONE of the above will actually start any workers in *PARALLEL*!
-    That means if you have multiple mapping definitions in either ixdirmap or ixmap they run *sequential*, i.e. one after
-    the other.
-    BUT: if you want to run in parallel this is possible as well, of course! For this you need just a little preparation first:
-        
-        1) create a symlink for each worker like this:
-            $> ln -s $TOOLX ${TOOLX}_XXX (e.g replace XXX with a number or custom name)
-        
-        2) execute ${TOOLX}_XXX with --ixmap or --ixdirmap option:
-            $> ./${TOOLX}_XXX -y --ixdirmap="/var/dir1,colddb,srv1:/mnt/dir1 /var/dir2,db,srv1:/mnt/dir2"
-            or
-            $> ./${TOOLX}_XXX -y --ixmap="ix01,db,srv1:/mnt/fastdisk ix01,colddb,srv2:/mnt/slowdisk"
-        
-        3) repeat steps 1-2 for as many workers as you want to start
 
-    
+    -T <target-server> 
+    --target=<target-server>
+
+                        The target indexer you want to sync the local data to.
+                        Ensure you have exchanged your local ssh pub key to this server.
+
+                        Examples:
+                        -T myindexer1.local
+                        --target myindexer2.local
+
+    --indexconfig=<path>|<download-uri>|<git-repo>
+ 
+                        full path to the mandatory configuration file which can exists locally
+                        or
+                        specified as a direct-download URL (must start with http/https)
+                        or
+                        specified as a git repo (must start with "git@")
+
+                        Format: <index-path>,<index type>,<target-path>,<after>,<before>,<priority>
+
+                        index-path: /<local-splunk-path/<index-name>
+                                    the local full path to the index which should be synced
+
+                        index-type: hot|db|colddb|summary
+                                    (only 1 allowed, if you need more then 1 add each separately - 1 per line)
+                                    hot = hot, db = warm, colddb = cold, summary = summary index
+
+                        target-path: /opt/splunk_data/fastdisk for hot, warm & summary and /opt/splunk_data/slowdisk for cold
+
+                        after: 0|all|<123>days|<full date + time>
+                               0|all:
+                                    no starting time (i.e sync from the beginning)
+                                    ignored when index-type = hot.
+
+                               <123>days:
+                                    how many days backwards should be synced (not 100% exact)
+                                    or in other words: OLDEST event you want to sync - in days
+                                    Format: "123days"
+
+                               <full date + time>:
+                                    date & time when the sync should start (not 100% exact).
+                                    or in other words: OLDEST event you want to sync - as date+time
+                                    Format: "YYYY-MM-DD hh:mm:ss"
+
+                        before: 0|all|now|<123>days|<full date + time>
+                                0|all|now:    
+                                    no end time (i.e sync until now - especially useful when using the sync in never-ending mode)
+                                    ignored when index-type = hot.
+
+                               <123>days:
+                                    how many days backwards should be synced (not 100% exact)
+                                    or in other words: NEWEST event you want to sync - in days
+                                    Format: "123days"
+
+                               <full date + time>:
+                                    date & time when the sync should end (not 100% exact).
+                                    or in other words: NEWEST event you want to sync - as date+time
+                                    Format: "YYYY-MM-DD hh:mm:ss"
+
+                        priority: 1-3 (NOTE: NOT IMPLEMENTED YET!)
+                                  1: index will run in a fully dedicated process to sync as fast as possible
+                                  2 + 3 will run with lower and lowest sync priority and share the sync process with others.
+
+                                  This setting is just for sync ordering and has nothing to do with priorizing system ressources.
+                                  Use 1 with care as it can put noticable load on source(s) and target(s) when specified too often.
+
+                        EXAMPLES:
+
+                        /opt/splunk_data/fastdisk/cc,hot,/opt/splunk_data/fastdisk,all,all,1
+                        /opt/splunk_data/fastdisk/cc,db,/opt/splunk_data/fastdisk,30days,now,3
+                        /opt/splunk_data/slowdisk/foo,colddb,/opt/splunk_data/slowdisk,90days,now,3
+                        /opt/splunk_data/fastdisk/bar,summary,/opt/splunk_data/fastdisk,2021-01-01 00:00:00,now,2
+                        /opt/splunk_data/fastdisk/bar,db,/opt/splunk_data/fastdisk,2021-02-01 00:00:00,2021-04-01 14:00:00,2
+
+
+    NOTE:
+    if you want to run syncs in parallel you have to set the priority 1 on each wanted index (test CPU and bandwidth usage before doing
+    this in a production environment!) otherwise $TOOL will handle these automatically based on the load.
+
     Sync: OPTIONAL arguments
     --------------------------------------------------------------
     
@@ -823,14 +871,12 @@ F_HELPSYNC(){
                                     summaryinfo_xxx logfile. Overrides default (currently set to $CALCSIZES).
                                 
         -G  <REMOTE GUID>           This will replace a local (auto detected) splunk GUID with the given GUID on the remote server.
-        --remoteguid=<REMOTE GUID>  you can identify the server GUID here: $SPLDIR/etc/instance.cfg
-                                    i.e. the bucket directories will be renamed so they match with the remote running splunk instance.
-                                    Keep in mind that this is completely unsupported by splunk - while working well (afaik).
-                                    the special keyword: REMOVE will not replace the GUID but just remove it from the buckets instead.
-                                    NOTE:
-                                    This requires to have a detect-renamed patched version of rsync running on BOTH sites, i.e. the
-                                    source and the target!
-                                    see --help-patch-rsync for details on that.
+        --remoteguid=<REMOTE GUID>  you can identify the target server (!) GUID here: $SPLDIR/etc/instance.cfg
+                                    The bucket directories will be renamed so they match with the remote running splunk instance.
+                                    Keep in mind that this is completely unsupported by splunk - while working well - until further notice ;)
+                                    Instead of the GUID you can also use special keywords:
+                                        "REMOVE" will not replace the GUID but just remove it from the buckets instead
+                                        "AUTODETECT:<target-server>" will detect the target server GUID fully automatic
 
         --renumber                  If you plan to sync from multiple servers to the same target you have to ensure unique bucket
                                     id numbering. This parameter takes no arguments and works fully automated.
@@ -865,8 +911,7 @@ F_HELPSYNC(){
                                             b. if the bucket number is NOT found the bucket number of 1 will be used
                                         4. steps 3-7 from above
                                         5. if 3b is true the local DB gets updated as well
-                                    
-        
+
         Mail related options:
         -------------------------------------------
  
@@ -996,7 +1041,7 @@ F_HELPALL(){
         
 F_GETOPT(){
     [ $DEBUG -eq 1 ]&& echo "Reached F_GETOPT"
-    while getopts G:p:s:m:i:yf:E:Dr:c:b:j:-: OPT; do
+    while getopts G:T:p:s:m:i:yf:E:Dr:c:b:j:-: OPT; do
             [ $DEBUG -eq 1 ]&& echo "Checking $OPT"
             case "$OPT" in
             s)  SPEEDTARGET="$OPTARG" ;;
@@ -1013,6 +1058,7 @@ F_GETOPT(){
             ;;
             D)  DEBUG=1 ;;
             G)  REMGUID="$OPTARG" ;;
+            T)  export TARGETSERVER="$OPTARG" ;;
             r)  SPEEDROUNDS="$OPTARG" ;;
             c)  SPEEDCIPHER="$OPTARG" ;;
             b)  BSSIZE="$OPTARG" ;;
@@ -1033,21 +1079,45 @@ F_GETOPT(){
                mailto*          )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
                calcsizes=?*     )  CALCSIZES="$LONG_OPTARG" ; F_LOG "Setting CALCSIZES (new value: $LONG_OPTARG)";;
                calcsizes*       )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
-               ixmap=?*         )  IXMAPARRAY="$LONG_OPTARG" ; F_LOG "ixmap option set (value(s): $LONG_OPTARG)";;
-               ixmap*           )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
-               ixdirmap=?*      )  IXDIRMAPARRAY="$LONG_OPTARG" ; F_LOG "ixdirmap option set (value(s): $LONG_OPTARG)";;
-               ixdirmap*        )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
                heavydebug*      )  echo "DEBUG: DEBUG OVERLOAD MODE!!! THIS PRODUCES HEAVY OUTPUT VOLUME!!"; DEBUG=1; HEAVYDEBUG=1;;
-               forcesync*       )  F_OLOG "WARNING: forcesync set! Will ignore currently running sync processes! This can result in unexpected behaviour and it would be a better idea to stop all other sync processes instead!"; FCS=1;;           
-               help-speed       )  F_HELPSPEED ; exit 0 ;;
-               help-all         )  F_HELPALL ; exit 0 ;;
-               help-install     )  F_HELPINSTALL ; exit 0 ;;
-               help-sync        )  F_HELPSYNC ; exit 0;;
-               help-patch-rsync )  F_HELPPATCHRSYNC; exit 0;;
+               forcesync*       )  F_OLOG "WARNING: forcesync set! Will ignore currently running sync processes! This can result in unexpected behaviour and it would be a better idea to stop all other sync processes instead!"; FCS=1;;
                dryrun           )  DEBUG=1 ;;
                renumber         )  BUCKNUM=1 ;; 
                remoteguid=?*    )  REMGUID="$LONG_OPTARG" ; F_LOG "Setting REMGUID (new value: $LONG_OPTARG)" ;;
                remoteguid*      )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
+               target=?*        )  export TARGETSERVER="$LONG_OPTARG" ; F_LOG "Setting TARGETSERVER (new value: $LONG_OPTARG)" ;;
+               target*          )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
+               indexconfig=?*   )
+                                # check first if this is a local file or smth we need to download first
+                                unset IXCONF GITSERVER
+                                echo "$LONG_OPTARG" | egrep -q "http://|https://"
+                                if [ $? -eq 0 ];then
+                                    IXCONF=./indexconfig.dl
+                                    F_OLOG "remote url detected for indexconfig: downloading $LONG_OPTARG .."
+                                    wget "$LONG_OPTARG" -O $IXCONF
+                                else
+                                    echo "$LONG_OPTARG" | egrep -q "^git@"
+                                    if [ $? -eq 0 ];then
+                                        IXCONFPATH=./indexconfig
+                                        [ -d "$IXCONFPATH" ] && rm -rf "$IXCONFPATH"
+                                        F_OLOG "git repo detected for indexconfig: downloading $LONG_OPTARG .."
+                                        GITSERVER=$(echo "${LONG_OPTARG/,*}" | cut -d "@" -f 2 |cut -d ":" -f1)
+                                        F_PREPSSH $GITSERVER
+                                        git clone "${LONG_OPTARG/,*}" $IXCONFPATH
+                                        IXCONF="${IXCONFPATH}/${LONG_OPTARG/*,}"
+                                    fi
+                                fi
+                                ERR=$?
+                                [ "$ERR" -ne 0 ] && F_LOG "ERROR: remote URL specified for indexconfig but not able to download" && exit 3
+                                [ -z "$IXCONF" ] && IXCONF="$LONG_OPTARG"
+                                F_LOG "IXCONF has been set (new value: $IXCONF)"
+                                unset IXDIRMAPARRAY
+                                # create the IXDIRMAPARRAY based on the config file
+                                for i in $(cat $IXCONF | tr " " "_");do
+                                    IXDIRMAPARRAY="$IXDIRMAPARRAY $i"
+                                done
+               ;;
+               indexconfig*     )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
                '' )        break ;; # "--" terminates argument processing
                # NOT enabled here:  * )         echo "Illegal option --$OPTARG" >&2; exit 2 ;;
              esac
@@ -1057,11 +1127,6 @@ F_GETOPT(){
             ;;
         esac
     done
-    # syntax check(s)
-    if [ ! -z "$REMGUID" ];then
-        REMOTEGUID=$(echo "$REMGUID" | egrep -o "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}|REMOVE")
-        [ -z "$REMOTEGUID" ] && F_LOG "ERROR: the given GUID $REMGUID seems to be not a valid GUID!" exit 3
-    fi
 }
 
 # check required tools
@@ -1079,11 +1144,27 @@ F_EXIT(){
 
 # check sync mode syntax
 F_CHKSYNCTAX(){    
+    # check if target server is set
+    if [ -z "$TARGETSERVER" ];then
+        F_OLOG "You have to specify a target server. ABORTED"
+        echo "You have to specify a target server. Check $TOOLX --help-sync. ABORTED."
+        exit 4
+    fi
+
+    # prepare ssh conf
+    F_PREPSSH $TARGETSERVER
+
+    # check index config file
+    if [ -z "$IXCONF" ] || [ ! -f "$IXCONF" ];then
+        F_OLOG "You have to specify the index configuration file. ABORTED"
+        echo "You have to specify the index configuration file. Check $TOOLX --help-sync. ABORTED."
+        exit 4
+    fi
     # check general arg deps
     if [ -z "$IXMAPARRAY" ]&&[ -z "$IXDIRMAPARRAY" ];then
         F_OLOG "You have to specify one of --ixmap or --ixdirmap! ABORTED."
         echo "You have to specify one of --ixmap or --ixdirmap! Check $TOOLX --help. ABORTED."
-        exit
+        exit 4
     fi
     # check mail arg deps
     if [ "$MAILSYNC" == 1 ];then
@@ -1092,9 +1173,44 @@ F_CHKSYNCTAX(){
             if [ -z "$MAILRECPT" ];then
                 F_OLOG "You have specified 1 or more mail options but not given any mail address. ABORTED."
                 echo "You have specified 1 or more mail options but not given any mail address. Check $TOOLX --help. ABORTED."
-                exit
+                exit 4
             fi
         fi
+    fi
+    # syntax check for GUID
+    if [ ! -z "$REMGUID" ];then
+        REMOTEGUID=$(echo "$REMGUID" | egrep -o "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}|REMOVE|AUTODETECT")
+        if [ "$REMOTEGUID" == "AUTODETECT" ];then
+            GUIDSRV="${REMGUID}"
+            F_LOG "Using AUTODETECT on $TARGETSERVER"
+            REMOTEGUID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGETSERVER} "grep guid /opt/splunk/etc/instance.cfg | cut -d '=' -f 2 |tr -d ' '")
+        fi
+        [ -z "$REMOTEGUID" ] && F_LOG "ERROR: the given GUID $REMGUID ($REMOTEGUID) seems to be not a valid GUID!" && exit 3
+        F_LOG "Will use GUID=$REMOTEGUID"
+    fi
+}
+
+# prepare SSH config
+F_PREPSSH(){
+    F_LOG "$FUNCNAME: starting with $1"
+    unset CONFSRV
+
+    CONFSRV="$1"
+
+    # create if not exists with proper perms
+    [ ! -f "$HOME/.ssh/config" ] && touch $HOME/.ssh/config && chmod 600 $HOME/.ssh/config
+
+    [ -z "$CONFSRV" ] && F_LOG "ERROR: missing arg for $FUNCNAME" && exit 3
+
+    grep -q $CONFSRV $HOME/.ssh/config
+    if [ $? -ne 0 ];then
+        cat >> $HOME/.ssh/config << _EOSSH
+
+Host $CONFSRV
+    StrictHostKeyChecking no
+
+_EOSSH
+        [ $? -eq 0 ] && F_LOG "SSH configuration finished successfully for: $CONFSRV"
     fi
 }
 
@@ -1465,6 +1581,39 @@ F_BUCKETTYPE(){
     return 8
 }
 
+# takes a bucket name as param and returns the detected start/end time
+# param1: bucketname (without path)
+#
+# returns: start-time:end-time
+#
+# return codes:
+#   0 => ok
+#   3 => missing parameter
+#   * => error
+F_GETBUCKTIME(){
+    F_LOG "$FUNCNAME started with $1"
+    BUCK="$1"
+    
+    [ -z "$BUCK" ] && F_LOG "$FUNCNAME: FATAL no bucketname given" && return 3
+    
+    # check hot or not first
+    echo "$BUCK" |grep -q "hot_v"
+    HOTB=$?
+    
+    if [ $HOTB -eq 0 ];then
+        BUCKETSTART=0
+        BUCKETEND=0
+    else
+        BUCKETSTART=$(echo "$BUCK" | cut -d "_" -f 3 | egrep '^[0-9]{1}[0-9]{0,40}$')
+        BUCKETEND=$(echo "$BUCK" | cut -d "_" -f 2 | egrep '^[0-9]{1}[0-9]{0,40}$')
+    fi
+    F_LOG "$FUNCNAME: identified bucket start:end as: $BUCKETSTART:$BUCKETEND"
+    F_LOG "$FUNCNAME ended"
+    echo "$BUCKETSTART:$BUCKETEND"
+}
+
+
+
 ########################################################################
 # generate a bucket name with dynamic bucket numbering
 #   param 1: remote server
@@ -1682,7 +1831,11 @@ F_RSYNC(){
     TARGET="$2"
     [ -z "$3" ]&& F_LOG "$FUNCNAME: missing DBTYPE arg ! aborted!" && exit
     DBTYPE="$3"
-    
+    [ -z "$4" ]&& F_LOG "$FUNCNAME: no SYNCAFTER arg set"
+    SYNCAFTER=$4
+    [ -z "$5" ]&& F_LOG "$FUNCNAME: no SYNCBEFORE arg set"
+    SYNCBEFORE=$5
+
     # first trim the path and then get the index name
     TRIMTYPE=$(echo $SRCDIR | sed "s#/$DBTYPE\$##g")
     RSYNCINDEX=${TRIMTYPE##*/}
@@ -1831,13 +1984,15 @@ F_RSYNC(){
                     # SYNC LOOP
                     #
                     # https://docs.splunk.com/Documentation/Splunk/latest/Indexer/HowSplunkstoresindexes#Bucket_names
-                    BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ) | wc -l 2>&1)
+                    #BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ) | wc -l 2>&1)
+                    BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ) | wc -l 2>&1)
+                    F_LOG "find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS"
                     if [ $BUCKETLIST -eq 0 ];then
                         F_LOG "$FUNCNAME: FATAL: woah.. well.. the list of buckets is 0! So you want me to sync.. nothing? .. no way, SKIPPED!"
                         FORERR=99
                     else
                         F_LOG "$FUNCNAME: preparing syncing $BUCKETLIST buckets..."
-                        for bucket in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ));do
+                        for bucket in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ));do
                             F_WAITFORSPLUNK "${TARGET}" "10s"
                             # parse the original bucket name
                             OBUCKETNAME=${bucket##*/}
@@ -2212,126 +2367,6 @@ F_SYNCJOBS(){
     NOTIFYREMSPLUNK=0
     NOTIFYNEEDED=$1
     
-    # if single ix mapping is used
-    if [ ! -z "$IXMAPARRAY" ];then
-        # sync ixmap option:
-       for dirmap in $IXMAPARRAY;do
-            unset MAPIX MAPDBTYPE MAPTARGET MAPSERVER
-            MAPIX=$(echo $dirmap | cut -d "," -f 1)
-            MAPDBTYPE=$(echo $dirmap | cut -d "," -f 2)
-            MAPTARGET=$(echo $dirmap | cut -d "," -f 3)
-            MAPSERVER=${MAPTARGET%:*}
-            TARGETBASEDIR=${MAPTARGET##*:}
-    
-            if [ -z "$MAPIX" ]||[ -z "$MAPDBTYPE" ]||[ -z "$MAPTARGET" ]||[ -z "$MAPSERVER" ]||[ -z "$TARGETBASEDIR" ];then
-                [ $DEBUG -eq 1 ]&& echo "ERROR: one of MAPIXDIR, MAPDBTYPE, MAPTARGET, MAPSERVER or TARGETBASEDIR is missing ($MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER, $TARGETBASEDIR)!"
-                F_OLOG "ERROR: one of MAPIXDIR, MAPDBTYPE, MAPTARGET MAPSERVER, TARGETBASEDIR is missing ($MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER, $TARGETBASEDIR)!"
-                break
-            else
-                # check for valid db type
-                if [ "$MAPDBTYPE" == "db" -o "$MAPDBTYPE" == "colddb" -o "$MAPDBTYPE" == "summary" ];then
-                    [ $DEBUG -eq 1 ]&& echo "Valid db type detected (ixmap)"
-                else
-                    [ $DEBUG -eq 1 ]&& echo "ERROR: invalid db type detected (ixmap)! MAPDBTYPE = $MAPDBTYPE (have to be one of: db,colddb,summary)"
-                    F_OLOG "ERROR: ABORTED processing $IXDIR because invalid db type detected! MAPDBTYPE = $MAPDBTYPE (have to be one of: db,colddb,summary)"
-                    break
-                fi
-                [ $DEBUG -eq 1 ]&& echo "Parsing given arguments processed fine for $MAPIX, $MAPDBTYPE, $MAPTARGET, $MAPSERVER, $TARGETBASEDIR"
-                F_OLOG "Parsing given arguments processed fine for $MAPIX, $MAPDBTYPE, $MAPTARGET, $MAPSERVER, $TARGETBASEDIR"
-            fi
-            F_OLOG "Starting sync job for $MAPIX ($MAPDBTYPE)"
-        
-            # sync definitions:
-            # defintion for hot/warm buckets
-            if [ "$MAPDBTYPE" == "db" ];then
-                F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                
-                # get all defined paths (volume def) and homepaths
-                # as we do not want to use volumes we need to filter out them but to be able to do so
-                # we first need to identify them
-                for hotwarm in $($SPLUNKX btool indexes list  \
-                                | sed  '/^\[/,/\(^homePath =\|^path =\)/{//!d}' \
-                                | sed -n '/^\[/,/^\(homePath =\|path =\)/p' \
-                                | perl -i -p -e 's/\[//g;s/]\n/,/' \
-                                | egrep -v ",path = "\
-                                | egrep "^$MAPIX,"\
-                                | cut -d " " -f3 \
-                                | sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                #for hotwarm in $($SPLUNKX btool indexes list | egrep "^homePath =" | grep "/$MAPIX/" | cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" );do
-                    [ ! -d "$hotwarm" ] && F_LOG "ERROR: $hotwarm is specified but is not a local directory!!" && exit
-                    [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $hotwarm $MAPSERVER $MAPDBTYPE"
-                    F_RSYNC "$hotwarm" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
-                    NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                done
-            else
-                # sync definition for cold buckets
-                if [ "$MAPDBTYPE" == "colddb" ];then
-                    F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                    for cold in $($SPLUNKX btool indexes list  \
-                                | sed  '/^\[/,/\(^coldPath =\|^path =\)/{//!d}' \
-                                | sed -n '/^\[/,/^\(coldPath =\|path =\)/p' \
-                                | perl -i -p -e 's/\[//g;s/]\n/,/' \
-                                | egrep -v ",path = "\
-                                | egrep "^$MAPIX,"\
-                                | cut -d " " -f3 \
-                                | sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                    #for cold in $($SPLUNKX btool indexes list | egrep "^coldPath =" | grep "/$MAPIX/" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                        [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $cold $MAPSERVER $MAPDBTYPE"
-                        F_RSYNC "$cold" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
-                        NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                    done
-                else
-                    # sync definition for summary buckets
-                    # this one is a little bit more tricky as this do NOT need to be set explicitly and so can be missing in the regular index definition!
-                    if [ "$MAPDBTYPE" == "summary" ];then
-                        F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                        # first we parse all homepaths! and check if they contain a summary dir!
-                        # when not explicit set the summary path is /homePath/summary ...
-                        for undefsumm in $($SPLUNKX btool indexes list  \
-                                            | sed  '/^\[/,/\(^homePath =\|^path =\)/{//!d}' \
-                                            | sed -n '/^\[/,/^\(homePath =\|path =\)/p' \
-                                            | perl -i -p -e 's/\[//g;s/]\n/,/' \
-                                            | egrep -v ",path = "\
-                                            | egrep "^$MAPIX,"\
-                                            | cut -d " " -f3 \
-                                            | sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                        #for undefsumm in $($SPLUNKX btool indexes list | egrep "^homePath =" | grep "/$MAPIX/" | cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" );do
-                            # we replace the path (this can NOT handle custom paths - it would be possible to delete the last /xxx but then a missing custom path would fail!)
-                            ixsumpath="${undefsumm%*/db}/summary"
-                            [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $ixsumpath (<-- was created from: $undefsumm) $MAPSERVER $MAPDBTYPE"
-                            if [ ! -d "$ixsumpath" ];then
-                                F_LOG "WARN: cannot find $ixsumpath needed for syncing $ix...!"
-                                [ $DEBUG -eq 1 ]&& echo "WARN: cannot find $ixsumpath needed for syncing $ix...!"
-                            else
-                                [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $ixsumpath $MAPSERVER $MAPDBTYPE"
-                                F_RSYNC "$ixsumpath" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
-                                NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                            fi
-                        done
-                        # then we check for explicit defined summary paths and sync them
-                        for defsumm in $($SPLUNKX btool indexes list  \
-                                        | sed  '/^\[/,/\(^summaryHomePath =\|^path =\)/{//!d}' \
-                                        | sed -n '/^\[/,/^\(summaryHomePath =\|path =\)/p' \
-                                        | perl -i -p -e 's/\[//g;s/]\n/,/' \
-                                        | egrep -v ",path = "\
-                                        | egrep "^$MAPIX,"\
-                                        | cut -d " " -f3 \
-                                        | sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                        #for defsumm in $($SPLUNKX btool indexes list | egrep "^summaryHomePath =" | grep "/$MAPIX/" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g");do
-                            [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $ixsumpath (<-- was created from: $defsumm) $MAPSERVER $MAPDBTYPE"
-                            F_RSYNC "$defsumm" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
-                            NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                        done
-                    else
-                        F_OLOG "ERROR: MAPDBTYPE is not valid (<$MAPDBTYPE>)!"
-                        [ "$DEBUG" -eq 1 ]&& echo -e "ERROR: MAPDBTYPE is not valid (<$MAPDBTYPE>)!"
-                    fi
-                fi
-            fi
-        done
-    fi
-        
-    # if the dir mapping is used
     if [ ! -z "$IXDIRMAPARRAY" ];then
         # parse ixdirmap option:
         for dirmap in $IXDIRMAPARRAY;do
@@ -2342,13 +2377,37 @@ F_SYNCJOBS(){
             #MAPIXDIR="${FULLMAPIXDIR%/*}/"
             MAPDBTYPE=$(echo $dirmap | cut -d "," -f 2)
             MAPTARGET=$(echo ${dirmap} | cut -d "," -f 3)
-            MAPSERVER=${MAPTARGET%:*}
-            TARGETBASEDIR=$(echo "${MAPTARGET##*:}")
-            F_OLOG "MAPTARGET: $MAPTARGET, $MAPIXDIR , $MAPDBTYPE"
+            MAPSERVER=$TARGETSERVER
+            TARGETBASEDIR=${MAPTARGET}
+
+            MAPAFTER=$(echo ${dirmap} | cut -d "," -f 4)
+            case $MAPAFTER in
+                all|0) unset SYNCAFTER ;;
+                *days)
+                TSAFTER=$(date --date="-${MAPAFTER}" +%s); SYNCAFTER="-newerct @${TSAFTER}" ; F_LOG "Setting SYNCAFTER (${TSAFTER})"
+                ;;
+                *)
+                TSAFTER=$(date --date "${MAPAFTER/_/ }" +%s); SYNCAFTER="-newerct @${TSAFTER}" ; F_LOG "Setting SYNCAFTER (${TSAFTER})"
+                ;;
+            esac
+
+            MAPBEFORE=$(echo ${dirmap} | cut -d "," -f 5)
+            case $MAPBEFORE in
+                all|0|now) unset SYNCBEFORE ;;
+                *days)
+                TSBEFORE=$(date --date="-${MAPBEFORE}" +%s); SYNCBEFORE="! -newermt @${TSAFTER}" ; F_LOG "Setting SYNCBEFORE (${TSBEFORE})"
+                ;;
+                *)
+                TSBEFORE=$(date --date "${MAPBEFORE/_/ }" +%s); SYNCBEFORE="! -newermt @${TSBEFORE}" ; F_LOG "Setting SYNCBEFORE (${TSBEFORE})"
+                ;;
+            esac
+
+            MAPPRIO=$(echo ${dirmap} | cut -d "," -f 6)
+            F_OLOG "MAPTARGET: $MAPTARGET, $MAPIXDIR , $MAPDBTYPE, MAPAFTER=$MAPAFTER, MAPBEFORE=$MAPBEFORE, MAPPRIO=$MAPPRIO"
             
-            if [ -z "$MAPIXDIR" ]||[ -z "$MAPDBTYPE" ]||[ -z "$MAPTARGET" ]||[ -z "$MAPSERVER" ];then
+            if [ -z "$MAPIXDIR" ]||[ -z "$MAPDBTYPE" ]||[ -z "$MAPTARGET" ]||[ -z "$MAPSERVER" ]||[ -z "$MAPAFTER" ]||[ -z "$MAPBEFORE" ]||[ -z "$MAPPRIO" ];then
                 [ $DEBUG -eq 1 ]&& echo "ERROR: one of MAPIXDIR, MAPDBTYPE, MAPTARGET or MAPSERVER is missing ($MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER)!"
-                F_OLOG "ERROR: one of MAPIXDIR, MAPDBTYPE, MAPTARGET MAPSERVER is missing ($MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER)!"
+                F_OLOG "ERROR: one of MAPIXDIR, MAPDBTYPE, MAPTARGET MAPSERVER is missing ($MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER,$MAPAFTER,$MAPBEFORE, $MAPPRIO)!"
                 break
             else
                 # check for valid db type
@@ -2360,17 +2419,17 @@ F_SYNCJOBS(){
                     break
                 fi
                 [ $DEBUG -eq 1 ]&& echo "Given arguments processed fine for $MAPIXDIR,$MAPDBTYPE"
-                F_OLOG "Given arguments processed fine for ixdirmap: $MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER"
+                F_OLOG "Given arguments processed fine for ixdirmap: $MAPIXDIR, $MAPDBTYPE, $MAPTARGET, $MAPSERVER, $MAPAFTER, $MAPBEFORE, $MAPPRIO"
             fi
             F_OLOG "Starting sync job for $MAPIXDIR,$MAPDBTYPE"
         
             # sync definitions:
-            # defintion for hot/warm buckets
+            # definition for hot/warm buckets
             if [ "$MAPDBTYPE" == "db" ];then
                 F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
                 #for hotwarm in $($SPLUNKX btool indexes list | egrep "^homePath =" | cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]" );do
-                [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE"
-                F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
+                [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE $SYNCAFTER $SYNCBEFORE"
+                F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
                 NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
                 F_LOG "NOTIFYREMSPLUNK=$NOTIFYREMSPLUNK"
                 #done
@@ -2380,8 +2439,8 @@ F_SYNCJOBS(){
                 if [ "$MAPDBTYPE" == "colddb" ];then
                     F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
                     #for cold in $($SPLUNKX btool indexes list | egrep "^coldPath =" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]");do
-                    [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE"
-                    F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
+                    [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE $SYNCAFTER $SYNCBEFORE"
+                    F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
                     NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
                     #done
                     #F_GENMAILLOG "$LOG"
@@ -2400,14 +2459,14 @@ F_SYNCJOBS(){
                                 F_LOG "WARN: cannot find $ixsumpath needed for syncing $ix...!"
                                 [ "$DEBUG" -eq 1 ]&& echo -e "WARN: cannot find $ixsumpath needed for syncing $ix...!"
                             else
-                                F_RSYNC "$ixsumpath" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
+                                F_RSYNC "$ixsumpath" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
                                 NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
                             fi
                         done
                         # then we check for explicit defined summary paths and sync them
                         for defsumm in $($SPLUNKX btool indexes list | egrep "^summaryHomePath =" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]");do
                             [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $defsumm $MAPSERVER $MAPDBTYPE"
-                            F_RSYNC "$defsumm" "$MAPSERVER" $MAPDBTYPE 2>&1 >> $LOG
+                            F_RSYNC "$defsumm" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
                             NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
                         done
                     else
@@ -2569,6 +2628,7 @@ unset HELPERRUNNING
 if [ $ENDLESSRUN -eq 1 ];then
     F_LOG "Brave dude! This tool will run forever! Hope you enjoy it ;-)"
     NOTIFYQ=9
+    LASTERR=9
     NOTIFYREMSPLUNK=$IWANTREMOTENOTIFY
     if [ "$IWANTREMOTENOTIFY" == "1" ];then
         # intelligent handling of remote notifying depending on a given time span and even

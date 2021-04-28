@@ -27,9 +27,6 @@ Please always use the --help parameter of the tool itself to get the newest info
         --help-speed
         The help / usage info for the builtin speed tester
         
-        --help-patch-rsync
-        The help / usage info for how to patch rsync (deprecated)
-        
         --help-all
         All of the above
 ~~~
@@ -40,10 +37,10 @@ Please always use the --help parameter of the tool itself to get the newest info
 ~~~
     splunk-rsyncix INSTALL NOTES
     ---------------------------------
+
+    1) sync-splunk-ix expects the following tools installed:
     
-    1) splunk-rsyncix expects the following tools installed:
-    
-       /usr/bin/bc /usr/bin/rsync /usr/bin/mail /usr/bin/ssh /usr/bin/scp /usr/local/bin/shelper
+       /usr/bin/bc /usr/bin/rsync /usr/bin/mail /usr/bin/ssh /usr/bin/scp /usr/local/bin/shelper /usr/bin/wget
     
        If those are installed in different locations adjust the REQUIREDTOOLS variable.
 
@@ -55,7 +52,7 @@ Please always use the --help parameter of the tool itself to get the newest info
        (checkout the README there for the install/update steps)
     
     
-    3) Some commands within splunk-rsyncix requires to have a valid CLI / API authToken and so it is
+    3) Some commands within sync-splunk-ix requires to have a valid CLI / API authToken and so it is
        recommended to add a specific user and role for that on the SOURCE and on ALL REMOTE
        servers as well.
        
@@ -70,11 +67,17 @@ Please always use the --help parameter of the tool itself to get the newest info
 
             Either adjust the SPLCREDS variable with: "syncrole:YOURSECRET" or start the sync with:
             
-            $> SPLCREDS="syncrole:YOURSECRET" splunk-rsyncix ...
+            $> SPLCREDS="syncrole:YOURSECRET" sync-splunk-ix ...
             
         Required capabilities on the LOCAL servers:
             
             - N/A no credentials or user required
+
+    4) SSH access:
+
+       Every source server needs password-less access (i.e. ssh-key) to every target server.
+       For this you need to put each server's pub key on every target server (~/.ssh/authorized_keys).    
+
 ~~~
 
 ### --help-speed
@@ -94,7 +97,7 @@ Please always use the --help parameter of the tool itself to get the newest info
    
    The following both options can be used EXCLUSIVELY only and they HAVE TO be the first argument!
         
-        -netspeed -s TARGETSERVER [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER]
+        -netspeed -s <target-server> [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER]
             Test your connection by transferring data without any disk I/O
             The amount of data will be transferred without any disk IO.
             It uses the logic: local /dev/zero --> remote /dev/null
@@ -123,7 +126,7 @@ Please always use the --help parameter of the tool itself to get the newest info
                 3) arcfour      (usually requires sshd_config adjustment)
                 4) arcfour128   (usually requires sshd_config adjustment)
     
-        -filespeed -s TARGETSERVER -p STORAGE-PATH [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER ]
+        -filespeed -s <target-server> -p STORAGE-PATH [-r ROUNDS -b BLOCKSIZE -m AMOUNT -c SSH-CIPHER ]
         
             -p STORAGE-PATH
             The remote storage path where the test file should get written.
@@ -135,6 +138,7 @@ Please always use the --help parameter of the tool itself to get the newest info
             -m  --> SEE 'netspeed' above
             -c  --> SEE 'netspeed' above
             -b  --> SEE 'netspeed' above
+
 ~~~
 
 ### --help-sync
@@ -143,19 +147,19 @@ Please always use the --help parameter of the tool itself to get the newest info
    splunk-rsyncix USAGE / HELP for the sync process
    --------------------------------------------------------------
 
-    -y          This actually enables syncing. One of --ixdirmap or --ixmap is required, too
+    -y          This actually enables syncing.
                 (checkout the optional args if you want to override default options or starting in special modes).
     
     HINT: volume based index configuration is NOT supported yet!!!
     
-    FULL SPEED time ranges are set within splunk-rsyncix and are checked every 60 seconds. This is done by an extra
+    FULL SPEED time ranges are set within sync-splunk-ix and are checked every 60 seconds. This is done by an extra
     helper running independent from the current sync process.
     
     What happens when we enter or left the full speed time range?
-      1) All RUNNING rsync processes started by splunk-rsyncix will be adjusted on-the-fly(!) either by full speed or by low speed!
+      1) All RUNNING rsync processes started by sync-splunk-ix will be adjusted on-the-fly(!) either by full speed or by low speed!
       2) Any new rsync process will be started with the new prio
       
-    The following FULL SPEED time ranges are currently set (modify the time variables to your needs within splunk-rsyncix):
+    The following FULL SPEED time ranges are currently set (modify the time variables to your needs within sync-splunk-ix):
 
             sunday:     00:00-23:59
             monday:     00:00-06:59 20:00-23:59
@@ -168,57 +172,86 @@ Please always use the --help parameter of the tool itself to get the newest info
     
     Sync: REQUIRED arguments
     --------------------------------------------------------------
-    
-    You have to choose one of the following to actually start syncing:
-    
-            --ixdirmap="<localdir,dbtype,remote-server:/remote/rootpath>"
-                                
-            The *ixdirmap* defines:
-                
-                    1) the local(!) directory you want to sync
-                    2) the db type which can be either one of: db, colddb or summary
-                    3) the remote SERVER where the local dir should be synced to (FQDN or IP)
-                    4) the remote DIR where the local dir should be synced to (without index name|so the root dir)
-                    
-            This whole thing is ultra flexible and you can specify more then 1 mapping, of course!
-            If you want to define more then 1 mapping just use space as delimeter and regardless
-            of one or multiple mappings always use QUOTES!
-     
-    or alternatively if you are lazy and want to autodetect the LOCAL index path name:
-    
-        ATTENTION:
-        ixmap is LEGACY and will not get any new features like GUID replacement etc. for this ixdirmap is needed.
-        ixmap might get removed in v6 or later so better switch to ixdirmap NOW!
-    
-            --ixmap="<indexname,dbtype,remote-server:/remote/rootpath>"
-                                
-            The *ixmap* defines:
-                    
-                    1) The local index name you want to sync
-                    2) the db type which can be either one of: db, colddb or summary                                    
-                    3) the remote SERVER where the local dir should be synced to (FQDN or IP)
-                    4) the remote DIR where the local index should be synced to (without index name|so the root dir)
-                    
-            This whole thing is ultra flexible and you can specify more then 1 mapping, of course!
-            If you want to define more then 1 mapping just use space as delimeter and regardless
-            of one or multiple mappings always use QUOTES!
-    
-    NONE of the above will actually start any workers in *PARALLEL*!
-    That means if you have multiple mapping definitions in either ixdirmap or ixmap they run *sequential*, i.e. one after
-    the other.
-    BUT: if you want to run in parallel this is possible as well, of course! For this you need just a little preparation first:
-        
-        1) create a symlink for each worker like this:
-            $> ln -s splunk-rsyncix.sh splunk-rsyncix.sh_XXX (e.g replace XXX with a number or custom name)
-        
-        2) execute splunk-rsyncix.sh_XXX with --ixmap or --ixdirmap option:
-            $> ./splunk-rsyncix.sh_XXX -y --ixdirmap="/var/dir1,colddb,srv1:/mnt/dir1 /var/dir2,db,srv1:/mnt/dir2"
-            or
-            $> ./splunk-rsyncix.sh_XXX -y --ixmap="ix01,db,srv1:/mnt/fastdisk ix01,colddb,srv2:/mnt/slowdisk"
-        
-        3) repeat steps 1-2 for as many workers as you want to start
 
-    
+    -T <target-server> 
+    --target=<target-server>
+
+                        The target indexer you want to sync the local data to.
+                        Ensure you have exchanged your local ssh pub key to this server.
+
+                        Examples:
+                        -T myindexer1.local
+                        --target myindexer2.local
+
+    --indexconfig=<path>|<download-uri>|<git-repo>
+ 
+                        full path to the mandatory configuration file which can exists locally
+                        or
+                        specified as a direct-download URL (must start with http/https)
+                        or
+                        specified as a git repo (must start with "git@")
+
+                        Format: <index-path>,<index type>,<target-path>,<after>,<before>,<priority>
+
+                        index-path: /<local-splunk-path/<index-name>
+                                    the local full path to the index which should be synced
+
+                        index-type: hot|db|colddb|summary
+                                    (only 1 allowed, if you need more then 1 add each separately - 1 per line)
+                                    hot = hot, db = warm, colddb = cold, summary = summary index
+
+                        target-path: /opt/splunk_data/fastdisk for hot, warm & summary and /opt/splunk_data/slowdisk for cold
+
+                        after: 0|all|<123>days|<full date + time>
+                               0|all:
+                                    no starting time (i.e sync from the beginning)
+                                    ignored when index-type = hot.
+
+                               <123>days:
+                                    how many days backwards should be synced (not 100% exact)
+                                    or in other words: OLDEST event you want to sync - in days
+                                    Format: "123days"
+
+                               <full date + time>:
+                                    date & time when the sync should start (not 100% exact).
+                                    or in other words: OLDEST event you want to sync - as date+time
+                                    Format: "YYYY-MM-DD hh:mm:ss"
+
+                        before: 0|all|now|<123>days|<full date + time>
+                                0|all|now:    
+                                    no end time (i.e sync until now - especially useful when using the sync in never-ending mode)
+                                    ignored when index-type = hot.
+
+                               <123>days:
+                                    how many days backwards should be synced (not 100% exact)
+                                    or in other words: NEWEST event you want to sync - in days
+                                    Format: "123days"
+
+                               <full date + time>:
+                                    date & time when the sync should end (not 100% exact).
+                                    or in other words: NEWEST event you want to sync - as date+time
+                                    Format: "YYYY-MM-DD hh:mm:ss"
+
+                        priority: 1-3 (NOTE: NOT IMPLEMENTED YET!)
+                                  1: index will run in a fully dedicated process to sync as fast as possible
+                                  2 + 3 will run with lower and lowest sync priority and share the sync process with others.
+
+                                  This setting is just for sync ordering and has nothing to do with priorizing system ressources.
+                                  Use 1 with care as it can put noticable load on source(s) and target(s) when specified too often.
+
+                        EXAMPLES:
+
+                        /opt/splunk_data/fastdisk/cc,hot,/opt/splunk_data/fastdisk,all,all,1
+                        /opt/splunk_data/fastdisk/cc,db,/opt/splunk_data/fastdisk,30days,now,3
+                        /opt/splunk_data/slowdisk/foo,colddb,/opt/splunk_data/slowdisk,90days,now,3
+                        /opt/splunk_data/fastdisk/bar,summary,/opt/splunk_data/fastdisk,2021-01-01 00:00:00,now,2
+                        /opt/splunk_data/fastdisk/bar,db,/opt/splunk_data/fastdisk,2021-02-01 00:00:00,2021-04-01 14:00:00,2
+
+
+    NOTE:
+    if you want to run syncs in parallel you have to set the priority 1 on each wanted index (test CPU and bandwidth usage before doing
+    this in a production environment!) otherwise sync-splunk-ix will handle these automatically based on the load.
+
     Sync: OPTIONAL arguments
     --------------------------------------------------------------
     
@@ -231,7 +264,7 @@ Please always use the --help parameter of the tool itself to get the newest info
         -f [0-7]                    ionice full speed prio using more ressources on the server (default: 3)
                                     --> 0 means highest prio and 7 lowest
         
-        -E [0|1]                    1 will let run splunk-rsyncix forever - 0 means one shot only. Overrides default setting.
+        -E [0|1]                    1 will let run sync-splunk-ix forever - 0 means one shot only. Overrides default setting.
                                     If choosing 1 the rsync jobs will run in a never ending loop
                                     (useful to minimize the delta between old and new environment)
                                     Currently it is set to: 0 (0 oneshot, 1 endless loop)
@@ -240,14 +273,12 @@ Please always use the --help parameter of the tool itself to get the newest info
                                     summaryinfo_xxx logfile. Overrides default (currently set to 1).
                                 
         -G  <REMOTE GUID>           This will replace a local (auto detected) splunk GUID with the given GUID on the remote server.
-        --remoteguid=<REMOTE GUID>  you can identify the server GUID here: /opt/splunk/etc/instance.cfg
-                                    i.e. the bucket directories will be renamed so they match with the remote running splunk instance.
-                                    Keep in mind that this is completely unsupported by splunk - while working well (afaik).
-                                    the special keyword: REMOVE will not replace the GUID but just remove it from the buckets instead.
-                                    NOTE:
-                                    This requires to have a detect-renamed patched version of rsync running on BOTH sites, i.e. the
-                                    source and the target!
-                                    see --help-patch-rsync for details on that.
+        --remoteguid=<REMOTE GUID>  you can identify the target server (!) GUID here: /opt/splunk/etc/instance.cfg
+                                    The bucket directories will be renamed so they match with the remote running splunk instance.
+                                    Keep in mind that this is completely unsupported by splunk - while working well - until further notice ;)
+                                    Instead of the GUID you can also use special keywords:
+                                        "REMOVE" will not replace the GUID but just remove it from the buckets instead
+                                        "AUTODETECT:<target-server>" will detect the target server GUID fully automatic
 
         --renumber                  If you plan to sync from multiple servers to the same target you have to ensure unique bucket
                                     id numbering. This parameter takes no arguments and works fully automated.
@@ -282,8 +313,7 @@ Please always use the --help parameter of the tool itself to get the newest info
                                             b. if the bucket number is NOT found the bucket number of 1 will be used
                                         4. steps 3-7 from above
                                         5. if 3b is true the local DB gets updated as well
-                                    
-        
+
         Mail related options:
         -------------------------------------------
  
@@ -304,7 +334,7 @@ Please always use the --help parameter of the tool itself to get the newest info
         Debug options:
         -------------------------------------------
         
-        --forcesync                 splunk-rsyncix uses an intelligent handling and detection of multiple running sync
+        --forcesync                 sync-splunk-ix uses an intelligent handling and detection of multiple running sync
                                     processes and will skip to sync a folder when another sync is currently processing it!
                                     With this setting you can force to sync even when another sync process is still running!
                                     Use this option with care because it could result in unexpected behavior - It is better to stop
@@ -318,5 +348,6 @@ Please always use the --help parameter of the tool itself to get the newest info
         --heavydebug                Auto enables "-D". The absolute overload on debug messages. Actually will do 'set -x' so
                                     you will see really EVERYTHING. Use with care!!!
                                     Best practice is to redirect everything to a local file instead of stdout
-                                    e.g: splunk-rsyncix.sh -y --heavydebug > splunk-rsyncix.debug
+                                    e.g: sync-splunk-ix.sh -y --heavydebug > sync-splunk-ix.debug
+
 ~~~
