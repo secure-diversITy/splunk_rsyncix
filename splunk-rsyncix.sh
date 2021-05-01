@@ -20,7 +20,7 @@
 # Author & Support:     Thomas Fischer <mail@sedi.one>
 # Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
 #
-VERSION="6.0.6"
+VERSION="6.0.20"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -147,6 +147,9 @@ DEFIOPRIO=5
 # Debug mode (should be better set on the cmdline - check --help)
 DEBUG=0
 
+# dry run mode (should be better set on the cmdline - check --help)
+DRYRUN=0
+
 # heavy debug mode (should be set on the cmdline -> check --help)
 # This mode will enable set -x so if you do not want to see your terminal explode ... then better never use this! ;)
 HEAVYDEBUG=0
@@ -196,7 +199,7 @@ GREPSYNCEXCLUDES='rb_|hot_|\.rbsentinel|GlobalMetaData|_splunktemps'
 # splunkd init/systemd script should be adjusted to remove hot buckets before actually starting splunk.
 # hot buckets will be *not* added to the local sync-fishbucket as we cannot determine when a sync is
 # needed or not
-HOTSYNC=0
+HOTSYNC=1
 
 if [ $HOTSYNC -eq 1 ];then
     cat >$SYNCEXCLUDES<<EOFEXCL
@@ -212,9 +215,6 @@ fi
 # the remote system can be notified about the new bucket arrival.
 # can be 1 (yes) or 0 (no)
 IWANTREMOTENOTIFY=1
-
-# the remote notify command to use (will be executed on the REMOTE server)
-#EXECREMNOTIFY="shelperstatus"
 
 # the remote splunk binary (needs usually no adjustment)
 REMSPLUNKBIN=${REMSPLDIR}/bin/splunk
@@ -243,6 +243,13 @@ SPLCREDS="admin:changeme"
 
 # the fishbucket db paths where all the sync mappings are stored
 FDBPATH=./fishbucket
+
+# local hostname
+LHOST=$(hostname -s)
+
+# central file mapping db
+# used to identify dynamic fishbucket dbs on the remote server (nothing you need to care about) ;)
+FILEMAPDB="${REMSPLDIR}/.rsyncix_filemap.db"
 
 ###########################################################################################################
 ##### GENERAL settings END
@@ -275,19 +282,19 @@ DEFFULLSPEEDPRIO=3
 FULLSPEEDTIME0="00:00-23:59"
 TIME0PRIO=$DEFFULLSPEEDPRIO
 
-FULLSPEEDTIME1="00:00-06:59 20:00-23:59"
+FULLSPEEDTIME1="00:00-23:59"
 TIME1PRIO=$DEFFULLSPEEDPRIO
 
-FULLSPEEDTIME2="00:00-06:59 20:00-23:59"
+FULLSPEEDTIME2="00:00-23:59"
 TIME2PRIO=$DEFFULLSPEEDPRIO
 
-FULLSPEEDTIME3="00:00-06:59 20:00-23:59"
+FULLSPEEDTIME3="00:00-23:59"
 TIME3PRIO=$DEFFULLSPEEDPRIO
 
-FULLSPEEDTIME4="00:00-06:59 20:00-23:59"
+FULLSPEEDTIME4="00:00-23:59"
 TIME4PRIO=$DEFFULLSPEEDPRIO
 
-FULLSPEEDTIME5="00:00-06:59 20:00-23:59"
+FULLSPEEDTIME5="00:00-23:59"
 TIME5PRIO=$DEFFULLSPEEDPRIO
 
 FULLSPEEDTIME6="00:00-23:59"
@@ -344,10 +351,6 @@ LASTMAILFILE="${TOOL}.lastmail"
 # the splunk binary
 SPLUNKX=$SPLDIR/bin/splunk
 [ ! -x "$SPLUNKX" ] && echo -e "ERROR: cannot find splunk binary >$SPLUNKX<. Please adjust SPLDIR variable inside $TOOLX and try again" && exit 2
-
-# the internal rsync fishbucket (successfully synced bucket list)
-#FISHBUCKET=./fishbucket_${TOOL}.db
-#[ ! -f $FISHBUCKET ] && > $FISHBUCKET
 
 # origin logfile
 OLOG=$LOG
@@ -498,18 +501,18 @@ F_DATEIOCHECK()
         ;;
     esac
 
-    F_LOG "$FUNCNAME: Weekday: $CURDAY --> effective time range for full speed: $FULLSPEEDTIME"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Weekday: $CURDAY --> effective time range for full speed: $FULLSPEEDTIME"
 
     for t in $(echo "$FULLSPEEDTIME") ;do
-        F_LOG "$FUNCNAME: Checking given time range: $t" 
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Checking given time range: $t" 
         FSTART=$(echo ${t} | cut -d "-" -f1 |tr -d ":")
         FEND=$(echo ${t} | cut -d "-" -f2 |tr -d ":")
-        F_LOG "$FUNCNAME: \t--> effective start time for full speed: $FSTART" 
-        F_LOG "$FUNCNAME: \t--> effective end time for full speed: $FEND" 
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: \t--> effective start time for full speed: $FSTART" 
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: \t--> effective end time for full speed: $FEND" 
         if [ $CURTIME -ge $FSTART ] && [ $CURTIME -le $FEND ];then
             USEFULLSPEED=$((USEFULLSPEED + 1))
-            F_LOG "$FUNCNAME: Yeeeha! Full speed time ;-). Let the cable glow...!!" 
-            F_LOG "$FUNCNAME: Skipping any other time ranges we may have because 1 ok is enough!" 
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Yeeeha! Full speed time ;-). Let the cable glow...!!" 
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Skipping any other time ranges we may have because 1 ok is enough!" 
             break
         else
             USEFULLSPEED=0
@@ -527,7 +530,7 @@ F_DATEIOCHECK()
         # adjust the prio to run with given speed (either by -i or the default one)
         IOPRIO=$IOPRIOUNTOUCHED
     fi
-    F_LOG "$FUNCNAME: Prio was set to: $IOPRIO"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Prio was set to: $IOPRIO"
     # write the current prio to a file so our ionice helper knows about
     echo "IOPRIO=$IOPRIO" > $IOHELPERFILE
 }
@@ -940,8 +943,8 @@ F_HELPSYNC(){
         
         -D|--dry                    Using the D option enables the debug mode. In this mode NO real rsync job will be made!
                                     It will do a dry-run instead and the very first index will sleep for >$SLEEPTIME<
-                                    Besides that some extra debug messages gets written into the logfile and you will get the
-                                    summary info printed on stdout.
+
+        --verbose                   Enables debugging output into all logs.
                                 
         --heavydebug                Auto enables "-D". The absolute overload on debug messages. Actually will do 'set -x' so
                                     you will see really EVERYTHING. Use with care!!!
@@ -1056,7 +1059,7 @@ F_GETOPT(){
             ENDLESSRUN="$OPTARG"
             F_LOG "Set run mode to: $ENDLESSRUN"
             ;;
-            D)  DEBUG=1 ;;
+            D)  DRYRUN=1 ;;
             G)  REMGUID="$OPTARG" ;;
             T)  export TARGETSERVER="$OPTARG" ;;
             r)  SPEEDROUNDS="$OPTARG" ;;
@@ -1081,7 +1084,8 @@ F_GETOPT(){
                calcsizes*       )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
                heavydebug*      )  echo "DEBUG: DEBUG OVERLOAD MODE!!! THIS PRODUCES HEAVY OUTPUT VOLUME!!"; DEBUG=1; HEAVYDEBUG=1;;
                forcesync*       )  F_OLOG "WARNING: forcesync set! Will ignore currently running sync processes! This can result in unexpected behaviour and it would be a better idea to stop all other sync processes instead!"; FCS=1;;
-               dryrun           )  DEBUG=1 ;;
+               dry              )  DRYRUN=1 ;;
+               verbose          )  DEBUG=1 ;;
                renumber         )  BUCKNUM=1 ;; 
                remoteguid=?*    )  REMGUID="$LONG_OPTARG" ; F_LOG "Setting REMGUID (new value: $LONG_OPTARG)" ;;
                remoteguid*      )  echo "No arg for --$OPTARG option" >&2; exit 2 ;;
@@ -1093,14 +1097,14 @@ F_GETOPT(){
                                 echo "$LONG_OPTARG" | egrep -q "http://|https://"
                                 if [ $? -eq 0 ];then
                                     IXCONF=./indexconfig.dl
-                                    F_OLOG "remote url detected for indexconfig: downloading $LONG_OPTARG .."
+                                    F_LOG "remote url detected for indexconfig: downloading $LONG_OPTARG .."
                                     wget "$LONG_OPTARG" -O $IXCONF
                                 else
                                     echo "$LONG_OPTARG" | egrep -q "^git@"
                                     if [ $? -eq 0 ];then
                                         IXCONFPATH=./indexconfig
                                         [ -d "$IXCONFPATH" ] && rm -rf "$IXCONFPATH"
-                                        F_OLOG "git repo detected for indexconfig: downloading $LONG_OPTARG .."
+                                        F_LOG "git repo detected for indexconfig: downloading $LONG_OPTARG .."
                                         GITSERVER=$(echo "${LONG_OPTARG/,*}" | cut -d "@" -f 2 |cut -d ":" -f1)
                                         F_PREPSSH $GITSERVER
                                         git clone "${LONG_OPTARG/,*}" $IXCONFPATH
@@ -1182,17 +1186,17 @@ F_CHKSYNCTAX(){
         REMOTEGUID=$(echo "$REMGUID" | egrep -o "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}|REMOVE|AUTODETECT")
         if [ "$REMOTEGUID" == "AUTODETECT" ];then
             GUIDSRV="${REMGUID}"
-            F_LOG "Using AUTODETECT on $TARGETSERVER"
+            [ $DEBUG -eq 1 ] && F_LOG "Using AUTODETECT on $TARGETSERVER"
             REMOTEGUID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGETSERVER} "grep guid /opt/splunk/etc/instance.cfg | cut -d '=' -f 2 |tr -d ' '")
         fi
         [ -z "$REMOTEGUID" ] && F_LOG "ERROR: the given GUID $REMGUID ($REMOTEGUID) seems to be not a valid GUID!" && exit 3
-        F_LOG "Will use GUID=$REMOTEGUID"
+        [ $DEBUG -eq 1 ] && F_LOG "Will use GUID=$REMOTEGUID"
     fi
 }
 
 # prepare SSH config
 F_PREPSSH(){
-    F_LOG "$FUNCNAME: starting with $1"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: starting with $1"
     unset CONFSRV
 
     CONFSRV="$1"
@@ -1227,20 +1231,20 @@ F_LOCK(){
         if [ $FCS -eq 0 ];then
             if [ $PSERR -eq 0 ]||[ "$DEBUG" -eq 1 ];then
                 # still valid / rsync in progress
-                F_LOG "$LOCKDIR is currently rsynced by another process so we will skip that one (<$LOCKFILE> exists)."
+                [ $DEBUG -eq 1 ] && F_LOG "$LOCKDIR is currently rsynced by another process so we will skip that one (<$LOCKFILE> exists)."
                 SKIPDIR=1
             else
                 # lockfile not valid anymore!
-                F_LOG "$LOCKDIR has a lock file set (<$LOCKFILE>) but no matching rsync process exists!! Will force resync!"
+                [ $DEBUG -eq 1 ] && F_LOG "$LOCKDIR has a lock file set (<$LOCKFILE>) but no matching rsync process exists!! Will force resync!"
                 SKIPDIR=0
             fi
         else
-            F_LOG "$LOCKDIR forcesync option was set!! Will force resync regardless of current running processes!"
+            [ $DEBUG -eq 1 ] && F_LOG "$LOCKDIR forcesync option was set!! Will force resync regardless of current running processes!"
             SKIPDIR=0
         fi
             
     else
-        F_LOG "Creating lock file <$LOCKFILE>"
+        [ $DEBUG -eq 1 ] && F_LOG "Creating lock file <$LOCKFILE>"
         touch "$LOCKFILE"
         SKIPDIR=0
     fi
@@ -1268,7 +1272,7 @@ F_LOCK(){
 #       0 : found           => prints the latest MAPPED bucketname
 #     >=1 : empty/error
 F_LOCALFISHBUCKET(){
-    F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5"
     WHAT="$1"
     DBTYPE="$2"
     IXNAME="$3"
@@ -1290,9 +1294,9 @@ F_LOCALFISHBUCKET(){
         F_LOCALFISHBUCKET check "$DBTYPE" "$IXNAME" "$OBUCKETNAME" "${REMNAME}"
         if [ $? -eq 1 ];then
             echo "${BUCKETNUM},${OBUCKETNAME},${REMNAME}" >> $MAPDB
-            F_LOG "$FUNCNAME: Added $OBUCKETNAME ($REMNAME) to the fishbucket db $MAPDB .."
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Added $OBUCKETNAME ($REMNAME) to the fishbucket db $MAPDB .."
         else
-            F_LOG "$FUNCNAME: SKIPPED adding $OBUCKETNAME to the fishbucket db $MAPDB (already found).."
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: SKIPPED adding $OBUCKETNAME to the fishbucket db $MAPDB (already found).."
         fi
         ;;
         delete)
@@ -1306,14 +1310,14 @@ F_LOCALFISHBUCKET(){
             STATE=$(grep "${OBUCKETNAME}" $MAPDB | sort -g | tail -n 1)
             LOCALBUCK=$(echo "$STATE" | cut -d "," -f 2)
             MAPBUCK=$(echo "$STATE" | cut -d "," -f 3)
-            F_LOG "$FUNCNAME: found existing bucket combo: $LOCALBUCK + $MAPBUCK"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: found existing bucket combo: $LOCALBUCK + $MAPBUCK"
             echo "${MAPBUCK}"
             ;;
             1)
-            F_LOG "$FUNCNAME: bucket ${OBUCKETNAME} not found, so go go go!"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: bucket ${OBUCKETNAME} not found, so go go go!"
             ;;
             *)
-            F_LOG "$FUNCNAME: unknown return state ($CHKERR)"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: unknown return state ($CHKERR)"
             ;;
         esac
         return $CHKERR
@@ -1325,7 +1329,7 @@ F_LOCALFISHBUCKET(){
         ;;
     esac
     
-    F_LOG "$FUNCNAME ended"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
 }
 
 # manage remote db locking to ensure exclusive access
@@ -1345,7 +1349,7 @@ F_LOCALFISHBUCKET(){
 #       8 : locked by someone else or an unknown issue occured while unlocking
 #     >=1 : error on unlocking
 F_REMOTESYNCDB(){
-    F_LOG "$FUNCNAME started with $1, $2, $3"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3"
     WHAT="$1"
     CSVR="$2"
     MAPPATH="$3"
@@ -1367,11 +1371,11 @@ F_REMOTESYNCDB(){
                 LOCKHOST=$(echo "$STATE" | cut -d "," -f 1)
                 LOCKTIMEST=$(echo "$STATE" | cut -d "," -f 2)
                 LOCKTIME=$(date --date=@${LOCKTIMEST})
-                F_LOG "$FUNCNAME: $MAPDBLOCK state is: LOCKED by: $LOCKHOST at $LOCKTIME"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: $MAPDBLOCK state is: LOCKED by: $LOCKHOST at $LOCKTIME"
                 echo $LOCKHOST
                 ;;
                 1)
-                F_LOG "$FUNCNAME: $MAPDBLOCK state is: NOT LOCKED ($LOCKERR)"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: $MAPDBLOCK state is: NOT LOCKED ($LOCKERR)"
                 ;;
                 *)
                 F_LOG "$FUNCNAME: $MAPDBLOCK state is: unknown ($LOCKERR)"
@@ -1404,9 +1408,9 @@ F_REMOTESYNCDB(){
             ssh -T -c $SCPCIPHER -o Compression=no -x "${CSVR}" "echo '$SRC,$CTIME' > $MAPDBLOCK" >> $LOG 2>&1
             LOCKERR=$?
             if [ "$LOCKERR" -eq 0 ];then
-                F_LOG "$FUNCNAME: $MAPDBLOCK LOCKED successfully"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: $MAPDBLOCK LOCKED successfully"
             else
-                F_LOG "$FUNCNAME: trying to lock $MAPDBLOCK ended with $LOCKERR ! That's bad."
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: trying to lock $MAPDBLOCK ended with $LOCKERR ! That's bad."
             fi
             return $LOCKERR
         ;;
@@ -1416,15 +1420,15 @@ F_REMOTESYNCDB(){
             CHKERR=$?
             if [ $CHKERR -eq 0 ] && [ -z "$RHOST" ];then
                 # DB has been locked by someone but it seems to be empty! so .. delete!
-                F_LOG "$FUNCNAME: unlocking $MAPDBLOCK (because no one owns it)"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: unlocking $MAPDBLOCK (because no one owns it)"
                 ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "rm $MAPDBLOCK" >> $LOG 2>&1
             elif [ $CHKERR -eq 0 ] && [ "$RHOST" == "$SRC" ];then
                 # DB has been locked by me, so YEA unlock it baby
-                F_LOG "$FUNCNAME: unlocking $MAPDBLOCK (because its mine)"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: unlocking $MAPDBLOCK (because its mine)"
                 ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "rm $MAPDBLOCK" >> $LOG 2>&1
             elif [ $CHKERR -eq 0 ] && [ ! -z "$RHOST" ];then
                 # DB locked and in use by another host
-                F_LOG "$FUNCNAME: $MAPDBLOCK can't be unlocked because it is owned by $RHOST.."
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: $MAPDBLOCK can't be unlocked because it is owned by $RHOST.."
                 return 8
             else
                 F_LOG "$FUNCNAME: unknown ERROR occured while checking the remote DB ($RHOST, $SRC, $CHKERR)"
@@ -1432,14 +1436,14 @@ F_REMOTESYNCDB(){
             fi
             LOCKERR=$?
             if [ "$LOCKERR" -eq 0 ];then
-                F_LOG "$FUNCNAME: $MAPDBLOCK UNLOCKED successfully"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: $MAPDBLOCK UNLOCKED successfully"
             else
                 F_LOG "$FUNCNAME: trying to unlock $MAPDBLOCK ended with $LOCKERR ! That's bad."
             fi
             return $LOCKERR
         ;;
     esac
-    F_LOG "$FUNCNAME ended"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
 }
 
 # handle remote sync db containing bucket names
@@ -1448,6 +1452,7 @@ F_REMOTESYNCDB(){
 # param 3: remote bucket path
 # param 4: index name
 # param 5: bucket name to be added, deleted or checked
+# param 6: bucket type
 #
 # "check" return states:
 #       0 : found OR initial run => also outputs the LATEST (i.e. not necessarily the original bucketname) or the original bucketname
@@ -1460,26 +1465,31 @@ F_REMOTESYNCDB(){
 #       0 : deleted successfully
 #     >=1 : error
 F_REMOTEFISHBUCKET(){
-    F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5, $6"
     WHAT="$1"
     CSVR="$2"
     MAPDB="${3}/.${TOOL}.db"
     IXNAME="$4"
     BUCKNAME="$5"
+    BT="$6"
     
     for arg in ${WHAT}x ${CSVR}x ${MAPDB}x ${IXNAME}x ${BUCKNAME}x;do
         [ "$arg" == "x" ] && F_LOG "$FUNCNAME: missing required ARG!" && return 9
     done
     
-    # create db if it does not exist
+    # create dbs if not exist
     ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "test -f $MAPDB || touch $MAPDB" >> $LOG 2>&1
-    
+    ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "test -f $FILEMAPDB || touch $FILEMAPDB" >> $LOG 2>&1
+ 
     case "$WHAT" in
         add) # NEXTSTEP: ADD BUCKET NUMBER AS FIRST COLUMN AND SORT !
+        # update the central file map db first (if needed)
+        ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "grep -q '${IXNAME}:${MAPDB}' $FILEMAPDB || echo '${IXNAME}:${MAPDB}' >> $FILEMAPDB" >> $LOG 2>&1
+
         BUCKETNUM=$(F_GETBUCKNUM "$BUCKNAME")
-        ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "echo '${BUCKETNUM},${IXNAME},${BUCKNAME}' >> $MAPDB" >> $LOG 2>&1
+        ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "echo '${BUCKETNUM},${IXNAME},${BUCKNAME},${LHOST}' >> $MAPDB" >> $LOG 2>&1
         LASTERR=$?
-        F_LOG "$FUNCNAME: adding $BUCKNAME to the fishbucket db $MAPDB ended with $LASTERR.."
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: adding $BUCKNAME to the fishbucket db $MAPDB ended with $LASTERR.."
         return $LASTERR
         ;;
         delete)
@@ -1490,30 +1500,77 @@ F_REMOTEFISHBUCKET(){
         STATE=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "grep '${BUCKETNUM},${IXNAME}' $MAPDB | tail -n 1")
         CHKERR=$?
         case $CHKERR in
-            0) # identical bucketname found! return the latest(!) db entry
+            0) # identical bucketname found! return the latest(!) db entry over all map dbs of that index
             DBIX=$(echo "$STATE" | cut -d "," -f 2)
             DBBUCKETNAME=$(echo "$STATE" | cut -d "," -f 3)
-            LASTENTRY=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "sort -g $MAPDB | tail -n 1")
+            cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
+for f in \$(grep '${IXNAME}:' $FILEMAPDB |cut -d : -f2);do
+    sort -g \$f
+done | tail -n 1
+_EOCMD
+            scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
+            LASTENTRY=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
             DBLATEST="${LASTENTRY/*,/}"
             
             if [ -z "$DBBUCKETNAME" ];then
-                F_LOG "$FUNCNAME: bucket combo not in remote db"
-                DBLATEST="${BUCKNAME}"
-                CHKERR=1
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: bucket combo not in remote db"
+                cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
+for f in \$(cat $FILEMAPDB |cut -d : -f2);do
+    sort -g \$f | cut -d ',' -f1
+done | tail -n 1
+_EOCMD
+                scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
+                LASTBUCKID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
+                if [ "$LASTBUCKID" -lt "$BUCKETNUM" ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is higher so GO!"
+                    DBLATEST="${BUCKNAME}"
+                    CHKERR=1
+                else
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is LOWER or equal so.. no way!"
+                fi
             else
-                F_LOG "$FUNCNAME: found existing bucket combo: $DBIX + $DBBUCKETNAME"
+                if [ "$BT" == "HOT" ];then
+                    ORIGIN=$(echo "$STATE" | cut -d "," -f 4)
+                    if [ -z "$ORIGIN" ];then
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: found existing HOT bucket which has no ORIGIN. Will take it over!"
+                        DBLATEST="${BUCKNAME}"
+                        CHKERR=5
+                    elif [ "$ORIGIN" == "${LHOST}" ];then
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: found existing HOT bucket which is owned by ME! ORIGIN: $ORIGIN. Re-syncing it..."
+                        DBLATEST="${BUCKNAME}"
+                        CHKERR=6
+                    else
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: found existing HOT bucket which is NOT owned by ME. ORIGIN: $ORIGIN"
+                    fi
+                else
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: found existing bucket combo: $DBIX + $DBBUCKETNAME"
+                fi
             fi
             if [ ! -z "$DBLATEST" ];then
-                F_LOG "$FUNCNAME: last entry is: $DBLATEST"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last entry is: $DBLATEST"
                 echo "$DBLATEST"
             else
-                F_LOG "$FUNCNAME: remote db seems to be empty (should happen on the very FIRST run only)!"
+                [ $DEBUG -eq 1 ] && [ "$BT" != "HOT" ] && F_LOG "$FUNCNAME: remote db seems to be empty (should happen on the very FIRST run only)!"
+                [ $DEBUG -eq 1 ] && [ "$BT" == "HOT" ] && F_LOG "$FUNCNAME: will use existing hot bucket in DB"
                 echo "${BUCKNAME}"
             fi
             ;;
             1)
-            #F_LOG "$FUNCNAME: bucket ${BUCKNAME} not found, so go go go!"
-            F_LOG "$FUNCNAME: bucket DB empty, so go go go!"
+            BUCKETNUM=$(F_GETBUCKNUM "$BUCKNAME")
+            cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
+for f in \$(cat $FILEMAPDB |cut -d : -f2);do
+    sort -g \$f | cut -d ',' -f1
+done | tail -n 1
+_EOCMD
+            scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
+            LASTBUCKID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
+            if [ "$LASTBUCKID" -lt "$BUCKETNUM" ];then
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is higher so GO!"
+                CHKERR=1
+            else
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is LOWER or equal so.. no way!"
+                CHKERR=0
+            fi
             ;;
             *)
             F_LOG "$FUNCNAME: unknown return state ($CHKERR)"
@@ -1523,11 +1580,12 @@ F_REMOTEFISHBUCKET(){
         ;;
     esac
     
-    F_LOG "$FUNCNAME ended"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
 }
 
 # takes a bucket name as param and returns the detected bucket numbering
 # param1: bucketname (without path)
+# param2: bucket type (as detected by F_BUCKETTYPE 
 #
 # returns: integer number parsed from param1
 #
@@ -1536,70 +1594,85 @@ F_REMOTEFISHBUCKET(){
 #   3 => missing parameter
 #   * => error
 F_GETBUCKNUM(){
-    F_LOG "$FUNCNAME started with $1"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1"
+    unset BUCK BUCKTYPE
+
     BUCK="$1"
+    BUCKTYPE="$2"
     
-    [ -z "$BUCK" ] && F_LOG "$FUNCNAME: FATAL no bucketname given" && return 3
+    [ -z "$BUCK" ] && F_LOG "$FUNCNAME: FATAL no bucketname or type given" && return 3
+    [ -z "$BUCKTYPE" ] && BUCKTYPE=$(F_BUCKETTYPE "$BUCK")
     
-    # check hot or not first
-    echo "$BUCK" |grep -q "hot_v"
-    HOTB=$?
-    
-    if [ $HOTB -eq 0 ];then
+    case "$BUCKTYPE" in
+        HOT)
         # hint: splunk starts numbering with 0
         BUCKETNUM=$(echo "$BUCK" |grep hot_v | cut -d "_" -f 3 | egrep '^[0-9]{1}[0-9]{0,100}$')
-    else
+        ;;
+        SUM)
+        BUCKETNUM=$(echo "$BUCK" | cut -d "_" -f 1 | egrep '^[0-9]{1}[0-9]{0,100}$')
+        ;;
+        *)
         # hint: splunk starts numbering with 0
         BUCKETNUM=$(echo "$BUCK" | cut -d "_" -f 4 | egrep '^[0-9]{1}[0-9]{0,40}$')
-    fi
-    F_LOG "$FUNCNAME: identified bucket number as: $BUCKETNUM"
-    F_LOG "$FUNCNAME ended"
+        ;;
+    esac
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: identified bucket number as: $BUCKETNUM"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
     echo "$BUCKETNUM"
 }
 
 # parses a bucket name to identify its type (hot, db ...)
-#   param1: bucketname
+#   param1: bucketname (w/o path)
 #
 # return codes:
-#       0 : parsed successfully, also outputs the type (HOT,DB)
+#       0 : parsed successfully, also outputs the type (HOT,DB,SUM)
 #     =<1 : error occured
 F_BUCKETTYPE(){
-    F_LOG "$FUNCNAME started with $1"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1"
     B=$1
     
     [ -z "$B" ] && F_LOG "$FUNCNAME: FATAL: missing arg!" && return 8
     
-    # hot bucket check
-    echo "$B" |grep -q "hot_v" && F_LOG "$FUNCNAME: hot bucket detected" && echo HOT && return
+    # hot bucket
+    echo "$B" |grep -q "hot_v"
+    if [ $? -eq 0 ];then
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: hot bucket detected"
+        echo HOT && return
+    fi
     
     # regular bucket (cold, warm ..)
-    echo "$B" |grep -q "db_" && F_LOG "$FUNCNAME: regular bucket detected" && echo DB && return
-    
-    # .. other checks (future use)
+    echo "$B" |grep -q "db_"
+    if [ $? -eq 0 ];then
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: regular bucket detected"
+        echo DB && return
+    fi
+
+    # summary bucket
+    echo "$B" |egrep -q "[0-9]*_[a-Z0-9]*-[a-Z0-9]*-[a-Z0-9]*-[a-Z0-9]*-[a-Z0-9]*$"
+    if [ $? -eq 0 ];then
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: summary bucket detected"
+        echo SUM && return
+    fi
     
     F_LOG "$FUNCNAME: FATAL: ended without determining a bucket type!"
     return 8
 }
 
-# takes a bucket name as param and returns the detected start/end time
-# param1: bucketname (without path)
+# takes a bucket name as param and returns it when in accepted time range
+# param1: bucketname (full path)
 #
-# returns: start-time:end-time
-#
-# return codes:
-#   0 => ok
-#   3 => missing parameter
-#   * => error
-F_GETBUCKTIME(){
-    F_LOG "$FUNCNAME started with $1"
-    BUCK="$1"
-    
-    [ -z "$BUCK" ] && F_LOG "$FUNCNAME: FATAL no bucketname given" && return 3
-    
+# returns: full bucket path - if in a valid time range
+F_CHECKBUCKTIME(){
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1"
+    FULLBUCK="$1"
+    BUCK="${FULLBUCK##*/}"
+
+    [ -z "$BUCK" ] && echo F_LOG "$FUNCNAME: FATAL no bucketname given" && return 3
+
     # check hot or not first
     echo "$BUCK" |grep -q "hot_v"
     HOTB=$?
-    
+
     if [ $HOTB -eq 0 ];then
         BUCKETSTART=0
         BUCKETEND=0
@@ -1607,9 +1680,24 @@ F_GETBUCKTIME(){
         BUCKETSTART=$(echo "$BUCK" | cut -d "_" -f 3 | egrep '^[0-9]{1}[0-9]{0,40}$')
         BUCKETEND=$(echo "$BUCK" | cut -d "_" -f 2 | egrep '^[0-9]{1}[0-9]{0,40}$')
     fi
-    F_LOG "$FUNCNAME: identified bucket start:end as: $BUCKETSTART:$BUCKETEND"
-    F_LOG "$FUNCNAME ended"
-    echo "$BUCKETSTART:$BUCKETEND"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: identified bucket start->end as: $BUCKETSTART->$BUCKETEND"
+
+    PRBUCK=0
+    if [ ! -z "$SYNCAFTER" ];then
+        [ "$BUCKETSTART" -ge "$SYNCAFTER" ] || return 2
+        if [ ! -z "$SYNCBEFORE" ];then
+            [ "$BUCKETEND" -le "$SYNCBEFORE" ] || return 2
+        fi
+        PRBUCK=1
+    else
+        if [ ! -z "$SYNCBEFORE" ];then
+            [ "$BUCKETEND" -le "$SYNCBEFORE" ] || return 2
+            PRBUCK=1
+        fi
+    fi
+    [ $DEBUG -eq 1 ] && [ "$PRBUCK" -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range"
+
+    [ "$PRBUCK" -eq 1 ] && echo "$FULLBUCK"
 }
 
 
@@ -1649,7 +1737,6 @@ F_GENBUCKNUM(){
     DBTYPE="$3"
     IXNAME="$4"
     OBUCKETNAME="$5"
-    LHOST=$(hostname)
     unset NEWHOTB
     
     # parsing bucket type
@@ -1659,7 +1746,7 @@ F_GENBUCKNUM(){
     fi
     
     # parsing the bucket number
-    CBUCKETNUM=$(F_GETBUCKNUM "$OBUCKETNAME")
+    CBUCKETNUM=$(F_GETBUCKNUM "$OBUCKETNAME" "$BT")
     
     # do the magic
     if [ -z "$CBUCKETNUM" ];then
@@ -1671,7 +1758,7 @@ F_GENBUCKNUM(){
         LASTERR=$?
         if [ "$LASTERR" -eq 0 ];then
             GUIDBUCKET="$MAPBUCKET"
-            F_LOG "$FUNCNAME: local bucket mapping found ..."
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: local bucket mapping found ..."
             ## check for corrupted remote DB (i.e missing entry) 
             #NEWDB=$(F_REMOTEFISHBUCKET check "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME")
             #if [ $? -eq 1 ];then
@@ -1689,16 +1776,16 @@ F_GENBUCKNUM(){
             #    return 1
             #fi
         else
-            F_LOG "$FUNCNAME: no local bucket mapping found."
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: no local bucket mapping found."
             # GUID check/replacement
             if [ "$REMOTEGUID" != "REMOVE" ] ;then
-                F_LOG "$FUNCNAME: will replace GUID $LOCALGUID with $REMOTEGUID ..."
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will replace GUID $LOCALGUID with $REMOTEGUID ..."
                 GUIDBUCKET="${OBUCKETNAME/${LOCALGUID}/$REMOTEGUID}"
             elif  [ "$REMOTEGUID" == "REMOVE" ] ;then
-                F_LOG "$FUNCNAME: will remove GUID $LOCALGUID from buckets"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will remove GUID $LOCALGUID from buckets"
                 GUIDBUCKET="${OBUCKETNAME/_${LOCALGUID}/}"
             else
-                F_LOG "$FUNCNAME: will not touch GUID $LOCALGUID from bucketname"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will not touch GUID $LOCALGUID from bucketname"
                 GUIDBUCKET="${OBUCKETNAME}"
             fi
         fi
@@ -1708,22 +1795,22 @@ F_GENBUCKNUM(){
         READD=0
         if [ $LOCKERR -eq 0 ];then
             # 3) F_REMOTEFISHBUCKET check server bucketpath index originalbucket
-            NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$GUIDBUCKET")
+            NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$GUIDBUCKET" "$BT")
             LASTERR=$?
-            # when LASTERR 0: found, 1 or NEWDB empty: not found
+            # when LASTERR 0: found, when 1 or NEWDB empty: not found, when 5 no origin, when 6 origin=me
             if [ -z "$NEWDB" ];then
                 # bucket name does not exist remotely so we can use the original one
                 BUCKETNAME="$GUIDBUCKET"
                 LASTERR=0
                 READD=1
-            elif [ "$BT" == "HOT" ];then
-                [ $LASTERR -eq 1 ] && READD=1
-                BUCKETNAME="$GUIDBUCKET"
-                F_LOG "$FUNCNAME: will sync existing remote path because of existing HOT bucket"
-                READD=0
-                LASTERR=0
-            elif [ $LASTERR -eq 0 ];then
-                F_LOG "$FUNCNAME: SKIPPING processing $GUIDBUCKET as it was synced previously and is NOT a HOT bucket."
+#            elif [ "$BT" == "HOT" ];then
+#                READD=0
+#                [ $LASTERR -eq 1 ] && READD=1
+#                BUCKETNAME="$GUIDBUCKET"
+#                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will sync existing remote path because of existing HOT bucket"
+#                LASTERR=0
+            elif [ $LASTERR -eq 0 ]&&[ "$BT" != "HOT" ];then
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: SKIPPING processing $GUIDBUCKET as it was synced previously and is NOT a HOT bucket."
                 F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
                 return 1
             else
@@ -1731,36 +1818,39 @@ F_GENBUCKNUM(){
                 NEWNUM=99
                 COUNTER=0
                 BUCKETNAME="$GUIDBUCKET"
-                while [ "$NEWNUM" -ne 1 ] && [ $COUNTER -lt 1000 ];do
-                    if [ "$NEWNUM" -ne 99 ];then
-                        F_LOG "$FUNCNAME: trying to generate a new bucket number.."
-                        NBUCKETNUM=$(F_GETBUCKNUM "$NEWDB")
-                        GENNUM=$(($NBUCKETNUM + 1))
-                        BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${GENNUM}/g")
-                    fi
-                    NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$BUCKETNAME")
-                    NEWNUM=$?
-                    [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME checking ended with errcode: $NEWNUM"
-                    COUNTER=$((COUNTER + 1))
-                done
-                LASTERR=$?
-                [ $COUNTER -gt 1000 ] \
-                    && F_LOG "$FUNCNAME: FATAL: giving up to find a new bucket number!!! Last generated result was: $BUCKETNAME" \
-                    && F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}" \
-                    && return 9
+                # skip gen bucket name when hot and we are the origin of that bucket
+                if [ "$BT" == "HOT" ] && [ $LASTERR -eq 5 -o $LASTERR -eq 6 ];then
+                    NEWNUM=1
+                else
+                    while [ "$NEWNUM" -ne 1 ] && [ $COUNTER -lt 5000 ];do
+                        if [ "$NEWNUM" -ne 99 ];then
+                            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: trying to generate a new bucket number.."
+                            NBUCKETNUM=$(F_GETBUCKNUM "$NEWDB")
+                            GENNUM=$(($NBUCKETNUM + 1))
+                            BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${GENNUM}/g")
+                        fi
+                        NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$BUCKETNAME" "$BT")
+                        NEWNUM=$?
+                        [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME checking ended with errcode: $NEWNUM"
+                        COUNTER=$((COUNTER + 1))
+                    done
+                    LASTERR=$?
+                    [ $COUNTER -gt 1000 ] \
+                        && F_LOG "$FUNCNAME: FATAL: giving up to find a new bucket number!!! Last generated result was: $BUCKETNAME" \
+                        && F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}" \
+                        && return 9
+                fi
             fi
-            if [ $LASTERR -eq 0 ]&&[ "$BT" != "HOT" ];then
-                F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME"
+            if [ $LASTERR -eq 0 ]||[ $LASTERR -eq 5 ];then
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME"
                 # 6) F_REMOTEFISHBUCKET add server bucketpath index generatedname
-                F_REMOTEFISHBUCKET add "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME"
+                F_REMOTEFISHBUCKET add "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME" "$BT"
                 LASTERR=$?
-            elif [ $READD -eq 1 ]&&[ "$BT" == "HOT" ];then
-                F_LOG "$FUNCNAME: re-adding missing hot bucket $BUCKETNAME to remote db"
-                F_REMOTEFISHBUCKET add "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME"
-                LASTERR=$?
-            fi
-            if [ $LASTERR -ne 0 ];then
-                F_LOG "$FUNCNAME: ERROR while adding bucket $BUCKETNAME to REMOTE fishbucket"
+                if [ $LASTERR -ne 0 ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: ERROR while adding bucket $BUCKETNAME to REMOTE fishbucket"
+                fi
+            elif [ $LASTERR -eq 6 ];then
+                F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME and skip adding it to REMOTE fishbucket"
             fi
             # 7) F_REMOTESYNCDB unlock server bucketpath
             F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
@@ -1777,10 +1867,13 @@ F_GENBUCKNUM(){
 # check for running splunkd by pid/lock file on the remote server
 # param 1 (required): remote server
 F_CHKSPLSTATE(){
-    F_LOG "$FUNCNAME started with $@"
     CSVR="$1"
-    #ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "test -f $REMLCKSPL" >> $LOG 2>&1
-    ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "$REMSPLDIR/bin/splunk status" >> $LOG 2>&1
+    if [ $DEBUG -eq 1 ];then
+        F_LOG "$FUNCNAME started with $@"
+        ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "$REMSPLDIR/bin/splunk status" >> $LOG 2>&1
+    else
+        ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "$REMSPLDIR/bin/splunk status" >> /dev/null 2>&1
+    fi
     STATE=$?
     [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME ended with $STATE"
     return $STATE
@@ -1790,7 +1883,7 @@ F_CHKSPLSTATE(){
 # param 1 (required): remote server
 # param 2 (required): waiting period between checks
 F_WAITFORSPLUNK(){
-    F_LOG "$FUNCNAME started with $1, $2"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2"
     STATE=9
     ISTATE=0
     TSRV=$1
@@ -1802,24 +1895,24 @@ F_WAITFORSPLUNK(){
         F_CHKSPLSTATE "$TSRV"
         STATE=$?
         if [ $STATE -ne 0 ];then
-            F_LOG "$FUNCNAME: delaying next check for $WAITT...." && sleep "$WAITT"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: delaying next check for $WAITT...."
+            sleep "$WAITT"
             # ensure waitinitdelay will run
             ISTATE=3
         else
             case $ISTATE in
                 0|1) break;;
                 3)
-                F_LOG "$FUNCNAME: splunk status reports ok, assuming splunk is running. Waiting $WAITINITDELAY to give splunk enough time to settle up.."
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: splunk status reports ok, assuming splunk is running. Waiting $WAITINITDELAY to give splunk enough time to settle up.."
                 sleep $WAITINITDELAY
                 ISTATE=1
-                F_LOG "$FUNCNAME: re-checking splunk status after init delay to be sure splunkd started properly"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: re-checking splunk status after init delay to be sure splunkd started properly"
                 ;;
             esac
         fi
     done
-    F_LOG "$FUNCNAME: All good, assuming splunk is really running."
-    F_LOG "$FUNCNAME ended"
-    
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: All good, assuming splunk is really running."
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
     return 0
 }
 
@@ -1843,7 +1936,7 @@ F_RSYNC(){
     echo "************************************************************************************************">> $LOG
     echo "$RSYNCINDEX" |egrep -q "$DEFDISABLEDIX"
     if [ $? -eq 0 ];then
-        F_LOG "$FUNCNAME: Skipping <$SRCDIR> sync as it is an internal index!" 
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Skipping <$SRCDIR> sync as it is an internal index!" 
     else
         F_LOG "$FUNCNAME: Starting <$SRCDIR> sync"
         unset SKIPDIR
@@ -1872,27 +1965,27 @@ F_RSYNC(){
             echo "$RSYNCINDEX" |egrep -q "'$IXNODBSYNC'"
             if [ $? -eq 0 ];then
                 PROBLEMINDEX=1
-                F_LOG "$FUNCNAME: Adjustment needed for: $RSYNCINDEX"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Adjustment needed for: $RSYNCINDEX"
                 RSYNCINDEX="$RSYNCINDEX/$DBTYPE"
-                F_LOG "$FUNCNAME: index name adjusted to: $RSYNCINDEX"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: index name adjusted to: $RSYNCINDEX"
                 SRCDIR="$SRCDIR/"
-                F_LOG "$FUNCNAME: src dir name adjusted to: $SRCDIR"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: src dir name adjusted to: $SRCDIR"
                 SPECIALEXCLUDES="--exclude 'db/' --exclude 'colddb/' --exclude 'thaweddb/' --exclude 'summary/'"
             else
                 PROBLEMINDEX=0
             fi
         
-            F_LOG "$FUNCNAME: Index: ${RSYNCINDEX}"
-            F_LOG "$FUNCNAME: Destination server: ${TARGET}" 
-            F_LOG "$FUNCNAME: Destination dir: $TARGETBASEDIR/${RSYNCINDEX} (FOLDER sync! Means the source folder will be created in $TARGETBASEDIR/${RSYNCINDEX}/)" 
-            F_LOG "$FUNCNAME: IO Priority: ${IOPRIO}"
-            F_LOG "$FUNCNAME: Local index size: $IXSIZEKB KB"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Index: ${RSYNCINDEX}"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Destination server: ${TARGET}" 
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Destination dir: $TARGETBASEDIR/${RSYNCINDEX} (FOLDER sync! Means the source folder will be created in $TARGETBASEDIR/${RSYNCINDEX}/)" 
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: IO Priority: ${IOPRIO}"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Local index size: $IXSIZEKB KB"
             # adjust io prio if needed
             F_DATEIOCHECK
             # let's continuesly monitor the io prio and adjust if needed
             F_STARTHELPER &
             SHPID=$!
-            F_LOG "$FUNCNAME: Initiated helper start in background (pid: $SHPID)"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Initiated helper start in background (pid: $SHPID)"
             # start optimized sync with time tracking using bash builtin time!
             TIMEFORMAT="runtime_real=%E;runtime_kernelsec=%S;runtime_usersec=%U;cpuusage_perc=%P"
             unset RUNTIME
@@ -1945,7 +2038,7 @@ F_RSYNC(){
                 # c arcfour: use the weakest but fastest SSH encryption. Might need to be specified as "Ciphers ......" in sshd_config on destination.
                 # o Compression=no: Turn off SSH compression.
                 # x: turn off X forwarding if it is on by default.
-            if [ "$DEBUG" -eq 1 ];then
+            if [ "$DRYRUN" -eq 1 ];then
                 # for debugging time calc we will have the very first entry sleeping longer to get valid data
                 if [ $DEBUGTIMER -eq 0 ];then
                     RUNTIME=$((echo "$FUNCNAME: DEBUG MODE NO rsync $SRCDIR happens here --> CUSTOM WAIT HERE ($SLEEPTIME) !!! ADJUST IF NEEDED" >> $LOG && time ionice -c2 -n7 sleep ${SLEEPTIME} ) 2>&1 | tr "." ".")
@@ -1957,20 +2050,25 @@ F_RSYNC(){
                 DEBUGTIMER=$((DEBUGTIMER + 1))
             else
                 # REAL RUN! CHANGES TARGET!
-                F_LOG "$FUNCNAME: Starting rsync from $SRCDIR to ${TARGET}:$TARGETBASEDIR/${RSYNCINDEX}:"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Starting rsync from $SRCDIR to ${TARGET}:$TARGETBASEDIR/${RSYNCINDEX}:"
                 ###RUNTIME=$((time ionice -c2 -n${IOPRIO} rsync -av --numeric-ids --delete $SPECIALEXCLUDES -e 'ssh -T -c $SCPCIPHER -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR/${RSYNCINDEX}  2>&1 >> $LOG) 2>&1 | tr "." "." ; exit ${PIPESTATUS[0]})
                 ###RUNTIME=$((time ionice -c2 -n${IOPRIO} rsync -av --numeric-ids --delete $SPECIALEXCLUDES --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR/${RSYNCINDEX} >> $LOG 2>&1) 2>&1 | tr "." "." ; exit ${PIPESTATUS[0]})
                 #RUNTIME=$((time ionice -c2 -n${IOPRIO} rsync --inplace -avm --numeric-ids --delete $SPECIALEXCLUDES --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR >> $LOG 2>&1) 2>&1 | tr "." "." ; exit ${PIPESTATUS[0]})
                 
-                TYPESRCDIR=$SRCDIR/$DBTYPE
-                TYPETARGETDIR=${TARGETBASEDIR}/${RSYNCINDEX}/${DBTYPE}
+                if [ "${DBTYPE}" == "hot" ];then
+                    TYPESRCDIR=$SRCDIR/db
+                    TYPETARGETDIR=${TARGETBASEDIR}/${RSYNCINDEX}/db
+                else
+                    TYPESRCDIR=$SRCDIR/$DBTYPE
+                    TYPETARGETDIR=${TARGETBASEDIR}/${RSYNCINDEX}/${DBTYPE}
+                fi
                 SYNCERR=0
 
                 LOCALGUID=$(grep guid $SPLDIR/etc/instance.cfg | egrep -o "[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}|REMOVE")
                 [ -z "$LOCALGUID" ] && F_LOG "ERROR: cannot determine a local GUID!!" && F_EXIT 99
                 ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} mkdir -p $TYPETARGETDIR >> $LOG 2>&1
-                F_LOG "creating $TYPETARGETDIR ended with $?"
-                F_LOG "ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} mkdir -p $TYPETARGETDIR"
+                [ $DEBUG -eq 1 ] && F_LOG "creating $TYPETARGETDIR ended with $?"
+                [ $DEBUG -eq 1 ] && F_LOG "ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} mkdir -p $TYPETARGETDIR"
                 
                 # extend the find arguments to scan for hot buckets when enabled
                 [ $HOTSYNC -eq 1 ] && FINDARGS='-or -name hot_*'
@@ -1979,26 +2077,38 @@ F_RSYNC(){
                 [ ! -f "$FISHBUCKET" ] && touch "$FISHBUCKET"
                 
                 if [ ! -z "$REMOTEGUID" ]||[ "$BUCKNUM" -eq 1 ];then
-                    F_LOG "$FUNCNAME: preparing sync process (bucket renumbering and/or GUID replacement choosen)"
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: preparing sync process (bucket renumbering and/or GUID replacement choosen)"
                     #
                     # SYNC LOOP
                     #
                     # https://docs.splunk.com/Documentation/Splunk/latest/Indexer/HowSplunkstoresindexes#Bucket_names
-                    #BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ) | wc -l 2>&1)
-                    BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ) | wc -l 2>&1)
-                    F_LOG "find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS"
-                    if [ $BUCKETLIST -eq 0 ];then
-                        F_LOG "$FUNCNAME: FATAL: woah.. well.. the list of buckets is 0! So you want me to sync.. nothing? .. no way, SKIPPED!"
+                    case $DBTYPE in
+                        summary)
+                            BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name "[0-9]*_${LOCALGUID}" | grep -vf <(printf "$(cat $FISHBUCKET)"))
+                            BUCKETCOUNT=$(echo "$BUCKETLIST" | wc -l)
+                        ;;
+                        hot)
+                            BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name "hot_*")
+                            BUCKETCOUNT=$(echo "$BUCKETLIST" | wc -l)
+                        ;;
+                        db|colddb)
+                            BUCKETLIST=$(for f in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' | grep -vf <(printf "$(cat $FISHBUCKET)"));do F_CHECKBUCKTIME "$f";done)
+                            BUCKETCOUNT=$(echo "$BUCKETLIST" | wc -l)
+                        ;;
+                        *)  BUCKETLIST=0; BUCKETCOUNT=0; F_LOG "FATAL: no valid DBTYPE specified: $DBTYPE" ;;
+                    esac
+                    if [ "$BUCKETCOUNT" -eq 0 ]||[ -z "$BUCKETLIST" ];then
+                        F_LOG "$FUNCNAME: woah.. well.. the list of buckets is 0 or BUCKETLIST is empty($BUCKETLIST)! So you want me to sync.. nothing? .. no way, SKIPPED!"
                         FORERR=99
                     else
-                        F_LOG "$FUNCNAME: preparing syncing $BUCKETLIST buckets..."
-                        for bucket in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d $SYNCAFTER $SYNCBEFORE -name 'db_*' $FINDARGS | grep -vf <(printf "$(cat $FISHBUCKET)" ));do
+                        F_LOG "$FUNCNAME: preparing syncing $BUCKETCOUNT buckets..."
+                        for bucket in $BUCKETLIST;do
                             F_WAITFORSPLUNK "${TARGET}" "10s"
                             # parse the original bucket name
                             OBUCKETNAME=${bucket##*/}
     
                             F_LOG "#-------------- start: $OBUCKETNAME --#"
-                            F_LOG "$FUNCNAME: .... processing bucket: $bucket"
+                            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: .... processing bucket: $bucket"
                             
                             # skip hot bucket processing when not enabled (double proof as usually we should NEVER see a hot bucket at this stage when not enabled)
                             BT=$(F_BUCKETTYPE "$OBUCKETNAME")
@@ -2015,23 +2125,23 @@ F_RSYNC(){
                                 GENERR=$?
                             fi
                             if [ $GENERR -eq 1 ];then
-                                F_LOG "$FUNCNAME: skipped $OBUCKETNAME as it has been synced already"
+                                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: skipped $OBUCKETNAME as it has been synced already"
                             elif [ -z "$BUCKETNAME" ];then
                                 F_LOG "$FUNCNAME: FATAL: cannot determine bucket name after processing! SKIPPED: $OBUCKETNAME!"
                             elif [ $GENERR -eq 0 ];then
                                 TARGETMODDIR="${TYPETARGETDIR}/${BUCKETNAME}"
-                                F_LOG "$FUNCNAME: remote bucket will be saved in: $TARGETMODDIR"
+                                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: remote bucket will be saved in: $TARGETMODDIR"
                                 if [ "$EXCLON" != "true" ];then
-                                    F_LOG "$FUNCNAME:\n$RSYNC --inplace -avm --numeric-ids $RSYNCARGS --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR"
+                                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME:\n$RSYNC --inplace -avm --numeric-ids $RSYNCARGS --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR"
                                     RUNTIME=$((time ionice -c2 -n${IOPRIO} $RSYNC $RSYNCARGS --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' ${bucket}/ ${TARGET}:${TARGETMODDIR}/ >> $LOG 2>&1) 2>&1 | tr "." "." ; exit ${PIPESTATUS[0]})
                                 else
-                                    F_LOG "$FUNCNAME:\n$RSYNC -avm --numeric-ids --exclude-from=$SYNCEXCLUDES $RSYNCARGS --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR"
+                                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME:\n$RSYNC -avm --numeric-ids --exclude-from=$SYNCEXCLUDES $RSYNCARGS --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR"
                                     RUNTIME=$((time ionice -c2 -n${IOPRIO} $RSYNC $RSYNCARGS --exclude-from=$SYNCEXCLUDES --rsh='ssh -T -c '$SCPCIPHER' -o Compression=no -x' ${bucket}/ ${TARGET}:${TARGETMODDIR}/ >> $LOG 2>&1) 2>&1 | tr "." "." ; exit ${PIPESTATUS[0]})
                                 fi
                                 LASTERR=$?
                                 if [ $LASTERR -eq 255 ];then
                                     F_LOG "$FUNCNAME: ERROR: Syncing $bucket ended with errorcode <$LASTERR> !!" 
-                                    F_LOG "$FUNCNAME: Please check if the choosen cipher: $SCPCIPHER is supported on $TARGET and review the above rsync messages carefully!"
+                                    F_LOG "$FUNCNAME: Please check if the choosen cipher: $SCPCIPHER is supported on $TARGET and maybe enable DEBUG mode."
                                     SYNCERR=$(($LASTERR + $LASTERR))
                                 else
                                     [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME: ... syncing $bucket to $TARGETMODDIR ended successfully!"
@@ -2087,7 +2197,7 @@ F_RSYNC(){
                         F_LOG "If $SCPCIPHER cipher is not listed copy all ciphers listed and add those together with the $SCPCIPHER cipher to your sshd_config"
                         F_LOG "If you see no errors above try executing this manually:\n#> rsync -av --numeric-ids --delete $SPECIALEXCLUDES -e 'ssh -T $SCPCIPHER -o Compression=no -x' $SRCDIR ${TARGET}:$TARGETBASEDIR/${RSYNCINDEX}"
                     else
-                        F_LOG "OK: Syncing $SRCDIR ended successfully!" 
+                        [ $DEBUG -eq 1 ] && F_LOG "OK: Syncing $SRCDIR ended successfully!" 
                     fi
                     F_LOG "Syncing <$SRCDIR> to ${TARGET}:$TARGETBASEDIR finished"
                     
@@ -2119,10 +2229,10 @@ F_RSYNC(){
             RENDTIME="$GENTIME"
             echo -e "PARSELINE;WORKER=$TOOLX;DEBUG=$DEBUG;IX=${RSYNCINDEX};DBTYPE=${DBTYPE};IXPATH=${SRCDIR};IXSIZEKB=${IXSIZEKB};IXSIZEMB=${IXSIZEMB};IXSIZEGB=${IXSIZEGB};REMIXSIZEKB=${REMIXSIZEKB};REMIXSIZEMB=${REMIXSIZEMB};REMIXSIZEGB=${REMIXSIZEGB};AREMIXSIZEKB=${AREMIXSIZEKB};AREMIXSIZEMB=${AREMIXSIZEMB};AREMIXSIZEGB=${AREMIXSIZEGB};TARGET=${TARGET}:${TARGETBASEDIR}/${RSYNCINDEX};BEFOREIOPRIO=${BEFOREIOPRIO};AFTERIOPRIO=${IOPRIO};${RUNTIME/*runtime_real/runtime_real};RSTARTTIME=$RSTARTTIME;RENDTIME=$RENDTIME\n" >> ${LOG}.parse
             rm -vf $LOCKFILE
-            F_LOG "Deleted lock file <$LOCKFILE>."
+            [ $DEBUG -eq 1 ] && F_LOG "Deleted lock file <$LOCKFILE>."
         else
-            F_LOG "Skipping <$SRCDIR> sync because it is in use by another rsync process."
-            F_OLOG "Skipping <$SRCDIR> sync because it is in use by another rsync process."
+            [ $DEBUG -eq 1 ] && F_LOG "Skipping <$SRCDIR> sync because it is in use by another rsync process."
+            [ $DEBUG -eq 1 ] && F_OLOG "Skipping <$SRCDIR> sync because it is in use by another rsync process."
         fi
     fi
     echo "************************************************************************************************">> $LOG
@@ -2190,7 +2300,7 @@ F_GENMAILLOG(){
                 F_LOG "Cannot calc as IXSIZEKB is error-getting-size"
             else
                 if [ "$REMIXSIZEKB" == "error-getting-size" ];then
-                    F_LOG "Remote dir does not exists so we assume 0 KB size"
+                    [ $DEBUG -eq 1 ] && F_LOG "Remote dir does not exists so we assume 0 KB size"
                     REMIXSIZEKB=0
                     REMIXSIZEMB=0
                     REMIXSIZEGB=0
@@ -2214,8 +2324,7 @@ F_GENMAILLOG(){
         if [ "$MAILONLYLONG" -eq 1 ];then
             RLONGRUN=$(echo $LONGRUN | tr -d "." | sed 's/^0*//g')
             RCALCRESULT=$(echo $CALCRESULT | tr -d "." | sed 's/^0*//g')
-            #[ $DEBUG -eq 1 ] &&
-            F_LOG "DEBUG: RCALCRESULT was $RCALCRESULT, RLONGRUN was $RLONGRUN (LONGRUN was $LONGRUN, CALCRESULT was $CALCRESULT"
+            [ $DEBUG -eq 1 ] && F_LOG "DEBUG: RCALCRESULT was $RCALCRESULT, RLONGRUN was $RLONGRUN (LONGRUN was $LONGRUN, CALCRESULT was $CALCRESULT"
             # fallback if calc went wrong
             [ -z $RCALCRESULT ]&& RCALCRESULT=0
             if [ $RCALCRESULT -ge $RLONGRUN ];then
@@ -2318,7 +2427,7 @@ F_GETRPID(){
 
 # this is some special M-A-G-I-C to set ionice on already running rsync processes
 F_STARTHELPER(){
-    F_LOG "$FUNCNAME: Helper run status: <$HELPERRUNNING> (empty means we will start the helper now)"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Helper run status: <$HELPERRUNNING> (empty means we will start the helper now)"
     
     if [ -z "$HELPERRUNNING" ];then
         while true;do
@@ -2328,22 +2437,22 @@ F_STARTHELPER(){
             # that the helper starts again
             HELPERRUNNING=$((HELPERRUNNING +1))
             if [ -f $IOHELPERFILE ];then
-                F_LOG "$FUNCNAME: Preparing helper run ..."
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Preparing helper run ..."
                 sleep 60
                 F_DATEIOCHECK
-                F_LOG "$FUNCNAME: Helper start count: $HELPERRUNNING"
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Helper start count: $HELPERRUNNING"
                 if [ -f $IOHELPERFILE ];then
                     [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: DEBUG: IO prio before sourcing the io prio file: $BEFOREIOPRIO"
                     # catch the written current (maybe changed) io prio from file
                     . $IOHELPERFILE
                     [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: DEBUG: IO prio after sourcing the io prio file: $IOPRIO"
                     if [ ! "$BEFOREIOPRIO" -eq "$IOPRIO" ];then
-                        F_LOG "$FUNCNAME: We need to adjust running rsync!! Previous IO prio was: $BEFOREIOPRIO and now: $IOPRIO"
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: We need to adjust running rsync!! Previous IO prio was: $BEFOREIOPRIO and now: $IOPRIO"
                         F_GETRPID
                         ionice -c2 -n $IOPRIO -p $RSYNCPIDS
-                        F_LOG "$FUNCNAME: Re-nice PID $RSYNCPIDS to $IOPRIO returned statuscode: $?"
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Re-nice PID $RSYNCPIDS to $IOPRIO returned statuscode: $?"
                     else
-                        F_LOG "$FUNCNAME: No adjustment of IO prio needed (was: $BEFOREIOPRIO, now: $IOPRIO)"
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: No adjustment of IO prio needed (was: $BEFOREIOPRIO, now: $IOPRIO)"
                     fi
                 else
                     F_LOG "$FUNCNAME: IO prio file $IOHELPERFILE is missing! Stopping helper!"
@@ -2356,7 +2465,7 @@ F_STARTHELPER(){
         done
         unset HELPERRUNNING
     else
-        F_LOG "$FUNCNAME: Skipping starting a new helper because there is one running already"
+        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Skipping starting a new helper because there is one running already"
     fi
 }
 
@@ -2384,10 +2493,10 @@ F_SYNCJOBS(){
             case $MAPAFTER in
                 all|0) unset SYNCAFTER ;;
                 *days)
-                TSAFTER=$(date --date="-${MAPAFTER}" +%s); SYNCAFTER="-newerct @${TSAFTER}" ; F_LOG "Setting SYNCAFTER (${TSAFTER})"
+                SYNCAFTER=$(date --date="-${MAPAFTER}" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
                 ;;
                 *)
-                TSAFTER=$(date --date "${MAPAFTER/_/ }" +%s); SYNCAFTER="-newerct @${TSAFTER}" ; F_LOG "Setting SYNCAFTER (${TSAFTER})"
+                SYNCAFTER=$(date --date "${MAPAFTER/_/ }" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
                 ;;
             esac
 
@@ -2395,10 +2504,10 @@ F_SYNCJOBS(){
             case $MAPBEFORE in
                 all|0|now) unset SYNCBEFORE ;;
                 *days)
-                TSBEFORE=$(date --date="-${MAPBEFORE}" +%s); SYNCBEFORE="! -newermt @${TSAFTER}" ; F_LOG "Setting SYNCBEFORE (${TSBEFORE})"
+                SYNCBEFORE=$(date --date="-${MAPBEFORE}" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
                 ;;
                 *)
-                TSBEFORE=$(date --date "${MAPBEFORE/_/ }" +%s); SYNCBEFORE="! -newermt @${TSBEFORE}" ; F_LOG "Setting SYNCBEFORE (${TSBEFORE})"
+                SYNCBEFORE=$(date --date "${MAPBEFORE/_/ }" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
                 ;;
             esac
 
@@ -2411,11 +2520,11 @@ F_SYNCJOBS(){
                 break
             else
                 # check for valid db type
-                if [ "$MAPDBTYPE" == "db" -o "$MAPDBTYPE" == "colddb" -o "$MAPDBTYPE" == "summary" ];then
-                    [ $DEBUG -eq 1 ]&& echo "Valid db type detected (ixdirmap)"
+                if [ "$MAPDBTYPE" == "db" -o "$MAPDBTYPE" == "colddb" -o "$MAPDBTYPE" == "summary" -o "$MAPDBTYPE" == "hot" ];then
+                    [ $DEBUG -eq 1 ]&& echo "Valid db type detected ($MAPDBTYPE)"
                 else
                     [ $DEBUG -eq 1 ]&& echo "ERROR: invalid db type detected! MAPDBTYPE = $MAPDBTYPE (have to be one of: db,colddb,summary)"
-                    F_OLOG "ERROR: ABORTED processing $IXDIR because invalid db type detected! MAPDBTYPE = $MAPDBTYPE (have to be one of: db,colddb,summary)"
+                    F_OLOG "ERROR: ABORTED processing $MAPIXDIR because invalid db type detected! MAPDBTYPE = $MAPDBTYPE (have to be one of: db,colddb,summary)"
                     break
                 fi
                 [ $DEBUG -eq 1 ]&& echo "Given arguments processed fine for $MAPIXDIR,$MAPDBTYPE"
@@ -2423,72 +2532,19 @@ F_SYNCJOBS(){
             fi
             F_OLOG "Starting sync job for $MAPIXDIR,$MAPDBTYPE"
         
-            # sync definitions:
-            # definition for hot/warm buckets
-            if [ "$MAPDBTYPE" == "db" ];then
+            # sync
+            if [ "$MAPDBTYPE" == "db" -o "$MAPDBTYPE" == "colddb" -o "$MAPDBTYPE" == "summary" -o "$MAPDBTYPE" == "hot" ];then
                 F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                #for hotwarm in $($SPLUNKX btool indexes list | egrep "^homePath =" | cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]" );do
                 [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE $SYNCAFTER $SYNCBEFORE"
                 F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
                 NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                F_LOG "NOTIFYREMSPLUNK=$NOTIFYREMSPLUNK"
-                #done
-                #F_GENMAILLOG "$LOG"
-            else
-                # sync definition for cold buckets
-                if [ "$MAPDBTYPE" == "colddb" ];then
-                    F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                    #for cold in $($SPLUNKX btool indexes list | egrep "^coldPath =" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]");do
-                    [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $MAPIXDIR $MAPSERVER $MAPDBTYPE $SYNCAFTER $SYNCBEFORE"
-                    F_RSYNC "$MAPIXDIR" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
-                    NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                    #done
-                    #F_GENMAILLOG "$LOG"
-                else
-                    # sync definition for summary buckets
-                    # this one is a little bit more tricky as this do NOT need to be set explicitly and so can be missing in the regular index definition!
-                    if [ "$MAPDBTYPE" == "summary" ];then
-                        F_SETLOG "$MAPSERVER" $MAPDBTYPE $LOG "norotate"
-                        # first we parse all homepaths! and check if they contain a summary dir!
-                        # when not explicit set the summary path is /homePath/summary ...
-                        for undefsumm in $($SPLUNKX btool indexes list | egrep "^homePath =" | cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]" );do
-                            # we replace the path (this can NOT handle custom paths - it would be possible to delete the last /xxx but then a missing custom path would fail!)
-                            ixsumpath="${undefsumm%*/db}/summary"
-                            [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $ixsumpath ($undefsumm) $MAPSERVER $MAPDBTYPE"
-                            if [ ! -d "$ixsumpath" ];then
-                                F_LOG "WARN: cannot find $ixsumpath needed for syncing $ix...!"
-                                [ "$DEBUG" -eq 1 ]&& echo -e "WARN: cannot find $ixsumpath needed for syncing $ix...!"
-                            else
-                                F_RSYNC "$ixsumpath" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
-                                NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                            fi
-                        done
-                        # then we check for explicit defined summary paths and sync them
-                        for defsumm in $($SPLUNKX btool indexes list | egrep "^summaryHomePath =" |cut -d " " -f3 |sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]");do
-                            [ "$DEBUG" -eq 1 ]&& echo -e "Starting rsync with: $defsumm $MAPSERVER $MAPDBTYPE"
-                            F_RSYNC "$defsumm" "$MAPSERVER" $MAPDBTYPE "$SYNCAFTER" "$SYNCBEFORE" 2>&1 >> $LOG
-                            NOTIFYREMSPLUNK=$((NOTIFYREMSPLUNK + $?))
-                        done
-                    else
-                        # thaweddb DISABLED. This is normally nothing we want to sync!
-                        # for thaw in $($SPLUNKX btool indexes list | egrep "^thawedPath =" | cut -d " " -f3 | sed "s#\\\$SPLUNK_DB/#$SPLUNK_DB#g" | egrep "\[$MAPIXDIR\]" );do
-                        #   F_RSYNC "$thaw" $JOB2TARGET thaweddb 2>&1 >> $LOG
-                        # done
-                        F_OLOG "ERROR: MAPDBTYPE is not valid (<$MAPDBTYPE>)!"
-                    fi
+                if [ "$IWANTREMOTENOTIFY" == "1" ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "EXECUTING REMOTE NOTIFY AS NEW BUCKETS HAVE BEEN SYNCED (and user specified it)!"
+                    F_EXECREMNOTIFY "$MAPSERVER" "${MAPIXDIR}/${MAPDBTYPE}" "$MAPIX"
                 fi
+                [ $DEBUG -eq 1 ] && F_LOG "NOTIFYREMSPLUNK=$NOTIFYREMSPLUNK"
             fi
             LASTERR=$?
-            #if [ "$IWANTREMOTENOTIFY" == "1" ]&&[ "$LASTERR" -eq 0 ];then
-            #    if [ $NOTIFYNEEDED -eq 1 ];then
-            #        F_LOG "EXECUTING REMOTE NOTIFY AS NEW BUCKETS HAVE BEEN SYNCED (and wait min time is over)!"
-            #        F_EXECREMNOTIFY "$MAPSERVER" "${MAPIXDIR}/${MAPDBTYPE}" "$MAPIX"
-            #    else
-            #        F_LOG "No need to notify the remote server!"
-            #    fi
-            #else
-            #    F_LOG "IWANTREMOTENOTIFY is not set so we do NOT notify the remote server!"
-            #fi
         done
     fi
 
@@ -2517,7 +2573,7 @@ F_SYNCJOBS(){
 
 # informs remote system of new bucket(s) arrival
 F_EXECREMNOTIFY(){
-    F_LOG "starting $FUNCNAME with $@"
+    [ $DEBUG -eq 1 ] && F_LOG "starting $FUNCNAME with $@"
     TARGET="$1"
     IXPATH="$2"
     IXNAME="$3"
@@ -2530,35 +2586,43 @@ F_EXECREMNOTIFY(){
         if [ $? -eq 0 ];then
             F_AUTH ${TARGET}
             EXECREMNOTIFY="rm ${IXPATH}/.bucketManifest ; $REMSPLUNKBIN _internal call /data/indexes/${IXNAME}/rebuild-metadata-and-manifests"
-            ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} "$EXECREMNOTIFY" >> $LOG 2>&1
+            if [ $DEBUG -eq 1 ];then
+                ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} "$EXECREMNOTIFY" >> $LOG 2>&1
+            else
+                ssh -T -c $SCPCIPHER -o Compression=no -x ${TARGET} "$EXECREMNOTIFY" >> /dev/null 2>&1
+            fi
             LASTERR=$?
             F_LOG "$FUNCNAME: Notifying ${TARGET} ended with $LASTERR"
         else
-            F_LOG "$FUNCNAME: Skipping remote notify as remote splunk seems to be DOWN!"
+            F_LOG "$FUNCNAME: Skipping remote notify as remote splunk seems to be DOWN or not fully restarted!"
             LASTERR=5
         fi
     fi
     
-    F_LOG "$FUNCNAME ended with $LASTERR"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended with $LASTERR"
     return $LASTERR
 }
 
 F_AUTH(){
-    F_LOG "starting $FUNCNAME with $@"
+    [ $DEBUG -eq 1 ] && F_LOG "starting $FUNCNAME with $@"
     unset REMSVR
     
     REMSVR="$1"
     
     if [ -z "$REMSVR" ];then
-        F_LOG "doing local authentication"
-        ${SHELPER}auth -auth "$SPLCREDS" >> $LOG 2>&1
+        [ $DEBUG -eq 1 ] && F_LOG "doing local authentication"
+        ${SHELPER}auth -auth "$SPLCREDS" 1>> $LOG
     else
-        F_LOG "doing remote authentication on ${REMSVR}"
-        ssh -T -c $SCPCIPHER -o Compression=no -x ${REMSVR} "${SHELPER}auth -auth '${SPLCREDS}'"  >> $LOG 2>&1
+        if [ $DEBUG -eq 1 ];then
+            F_LOG "doing remote authentication on ${REMSVR}"
+            ssh -T -c $SCPCIPHER -o Compression=no -x ${REMSVR} "${SHELPER}auth -auth '${SPLCREDS}'"  >> $LOG 2>&1
+        else
+            ssh -T -c $SCPCIPHER -o Compression=no -x ${REMSVR} "${SHELPER}auth -auth '${SPLCREDS}'"  >> /dev/null 2>&1
+        fi
     fi
     LASTERR=$?
     
-    F_LOG "$FUNCNAME ended with $LASTERR"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended with $LASTERR"
     return $LASTERR
 }
 
@@ -2624,13 +2688,15 @@ IOPRIOUNTOUCHED=$IOPRIO
 DEBUGTIMER=0
 unset HELPERRUNNING
 
+# prepare notify vars
+NOTIFYQ=9
+LASTERR=9
+NOTIFYREMSPLUNK=$IWANTREMOTENOTIFY
+ 
 # this actually STARTs all the magic (first of all we check if we run forever or not)
 if [ $ENDLESSRUN -eq 1 ];then
-    F_LOG "Brave dude! This tool will run forever! Hope you enjoy it ;-)"
-    NOTIFYQ=9
-    LASTERR=9
-    NOTIFYREMSPLUNK=$IWANTREMOTENOTIFY
-    if [ "$IWANTREMOTENOTIFY" == "1" ];then
+   F_LOG "Good boy you are brave! This tool will run forever! Hope you enjoy it ;-)"
+   if [ "$IWANTREMOTENOTIFY" == "1" ];then
         # intelligent handling of remote notifying depending on a given time span and even
         # with a notify queue so when the wait period is over it will happen in any case
         while true;do
@@ -2644,7 +2710,7 @@ if [ $ENDLESSRUN -eq 1 ];then
                     NOTIFYQ=0
                     NOTIFY=1
                     if [ "$LASTERR" -eq 0 ];then
-                        F_LOG "EXECUTING REMOTE NOTIFY AS NEW BUCKETS HAVE BEEN SYNCED (and wait min time is over)!"
+                        [ $DEBUG -eq 1 ] && F_LOG "EXECUTING REMOTE NOTIFY AS NEW BUCKETS HAVE BEEN SYNCED (and wait min time is over)!"
                         F_EXECREMNOTIFY "$MAPSERVER" "${MAPIXDIR}/${MAPDBTYPE}" "$MAPIX"
                     else
                         F_LOG "Need to notify as new buckets have been synced but there was an error during sync ($LASTERR) so skipping notify"
@@ -2670,7 +2736,7 @@ if [ $ENDLESSRUN -eq 1 ];then
         # just sync, no notify
         while true;do
             F_SYNCJOBS 1
-            _LOG "Skipping remote notify as disabled by user"
+            F_LOG "Skipping remote notify as disabled by user"
         done
     fi
 else
