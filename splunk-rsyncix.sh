@@ -20,7 +20,7 @@
 # Author & Support:     Thomas Fischer <mail@sedi.one>
 # Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
 #
-VERSION="6.0.24"
+VERSION="6.0.26"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -1458,7 +1458,7 @@ F_REMOTESYNCDB(){
 #
 # returns a valid bucket id
 F_GETSETREMOTEBID(){
-    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5, $6"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3"
     CSVR="$1"
     MAPDB="$2"
     BIDLOCAL="$3"
@@ -1473,7 +1473,7 @@ F_GETSETREMOTEBID(){
     F_REMOTESYNCDB lock "${CSVR}" "$MAPDB"
     BIDREMOTE=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "cat $MAPDB | tail -n 1")
     ERR=$?
-    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: fetching latest bid from $MAPDB was: $BID and ended with $ERR"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: fetching latest bid from $MAPDB was: $BIDREMOTE and ended with $ERR"
     if [ -z "$BIDREMOTE" ];then
         BID="$BIDLOCAL"
     else
@@ -1694,20 +1694,26 @@ F_CHECKBUCKTIME(){
         BUCKETSTART=$(echo "$BUCK" | cut -d "_" -f 3 | egrep '^[0-9]{1}[0-9]{0,40}$')
         BUCKETEND=$(echo "$BUCK" | cut -d "_" -f 2 | egrep '^[0-9]{1}[0-9]{0,40}$')
     fi
-    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: identified bucket start->end as: $BUCKETSTART->$BUCKETEND"
 
     PRBUCK=0
     if [ ! -z "$SYNCAFTER" ];then
-        [ "$BUCKETSTART" -ge "$SYNCAFTER" ] || return 2
+        if [ "$SYNCAFTER" -le "$BUCKETEND" ];then
+            if [ "$SYNCAFTER" -ge "$BUCKETSTART" ];then
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range $BUCKETSTART->$BUCKETEND"
+                PRBUCK=1
+            else
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($SYNCAFTER not -ge $BUCKETSTART)"
+                return 2
+            fi
+        else
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($SYNCAFTER not -le $BUCKETEND)"
+            return 2
+        fi
+    else
         if [ ! -z "$SYNCBEFORE" ];then
             [ "$BUCKETEND" -le "$SYNCBEFORE" ] || return 2
         fi
         PRBUCK=1
-    else
-        if [ ! -z "$SYNCBEFORE" ];then
-            [ "$BUCKETEND" -le "$SYNCBEFORE" ] || return 2
-            PRBUCK=1
-        fi
     fi
     [ $DEBUG -eq 1 ] && [ "$PRBUCK" -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range"
 
@@ -1835,7 +1841,9 @@ F_GENBUCKNUM(){
                     if [ "$BT" == "HOT" ] && [ $LASTERR -eq 5 -o $LASTERR -eq 6 ];then
                         [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME: skipping gen as this is a hot bucked which we will re-sync"
                     else
-                        VALIDBID=$(F_GETSETREMOTEBID "${CSVR}" "$REMBID" "$BUCKETNUM")
+                        VALIDBID=$(F_GETSETREMOTEBID "${CSVR}" "$REMBID" "$CBUCKETNUM")
+                        [ -z "$VALIDBID" ] && F_LOG "$FUNCNAME: FATAL VALIDBID is empty!?" && return 9
+                        [ "${VALIDBID}" -lt "${CBUCKETNUM}" ] && F_LOG "$FUNCNAME: WEIRD: VALIDBID is lower then mine: ${VALIDBID} -lt ${CBUCKETNUM}!?"
                         BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${VALIDBID}/g")
                         LASTERR=$?
                         [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME: BID before: ${CBUCKETNUM}, after: ${VALIDBID}"
