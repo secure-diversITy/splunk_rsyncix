@@ -20,7 +20,7 @@
 # Author & Support:     Thomas Fischer <mail@sedi.one>
 # Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
 #
-VERSION="6.0.20"
+VERSION="6.0.24"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -250,6 +250,9 @@ LHOST=$(hostname -s)
 # central file mapping db
 # used to identify dynamic fishbucket dbs on the remote server (nothing you need to care about) ;)
 FILEMAPDB="${REMSPLDIR}/.rsyncix_filemap.db"
+
+# central directory for all storing the latest bucket id of every index
+BUCKETIDPATH="${REMSPLDIR}/.rsyncix"
 
 ###########################################################################################################
 ##### GENERAL settings END
@@ -1353,8 +1356,11 @@ F_REMOTESYNCDB(){
     WHAT="$1"
     CSVR="$2"
     MAPPATH="$3"
-    MAPDBLOCK="${MAPPATH}/.${TOOL}.db.lock"
-    #MAPDBLOCK=${MAPDB}.lock
+    if [ "${MAPPATH/*\.bid/BID}" == "BID" ];then
+        MAPDBLOCK="${MAPPATH}.lock"
+    else
+        MAPDBLOCK="${MAPPATH}/.${TOOL}.db.lock"
+    fi
     SRC=$(hostname)
     CTIME=$(date +%s)
     
@@ -1446,6 +1452,45 @@ F_REMOTESYNCDB(){
     [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME ended"
 }
 
+# check a given bucket id with the latest bucket id on the target server
+# and updates the remote bucket tracker if needed. this way a process can
+# "reserve" and get an exclusive bucket id which is 100% unique.
+#
+# returns a valid bucket id
+F_GETSETREMOTEBID(){
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME started with $1, $2, $3, $4, $5, $6"
+    CSVR="$1"
+    MAPDB="$2"
+    BIDLOCAL="$3"
+     
+    for arg in ${CSVR}x ${MAPDB}x ${BIDLOCAL}x;do
+        [ "$arg" == "x" ] && F_LOG "$FUNCNAME: missing required ARG!" && return 9
+    done
+
+    # create db path if needed first
+    ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "test -d ${MAPDB%/*} || mkdir -p ${MAPDB%/*}"
+
+    F_REMOTESYNCDB lock "${CSVR}" "$MAPDB"
+    BIDREMOTE=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "cat $MAPDB | tail -n 1")
+    ERR=$?
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: fetching latest bid from $MAPDB was: $BID and ended with $ERR"
+    if [ -z "$BIDREMOTE" ];then
+        BID="$BIDLOCAL"
+    else
+        if [ "$BIDLOCAL" -gt "$BIDREMOTE" ];then
+            BID="$BIDLOCAL"
+        else
+            BID=$((BIDREMOTE + 1))
+        fi
+    fi
+    ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "echo $BID > $MAPDB" 1>> $LOG
+    ERR=$((ERR + $?))
+    F_REMOTESYNCDB unlock "${CSVR}" "$MAPDB"
+    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME updating $MAPDB with new bucket id: $BID ended with $ERR"
+    [ $ERR -eq 0 ] && echo "$BID"
+    return $ERR
+}
+
 # handle remote sync db containing bucket names
 # param 1: add | delete | check
 # param 2: remote server
@@ -1503,31 +1548,12 @@ F_REMOTEFISHBUCKET(){
             0) # identical bucketname found! return the latest(!) db entry over all map dbs of that index
             DBIX=$(echo "$STATE" | cut -d "," -f 2)
             DBBUCKETNAME=$(echo "$STATE" | cut -d "," -f 3)
-            cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
-for f in \$(grep '${IXNAME}:' $FILEMAPDB |cut -d : -f2);do
-    sort -g \$f
-done | tail -n 1
-_EOCMD
-            scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
-            LASTENTRY=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
+            LASTENTRY=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "sort -g $MAPDB | tail -n 1")
             DBLATEST="${LASTENTRY/*,/}"
             
             if [ -z "$DBBUCKETNAME" ];then
                 [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: bucket combo not in remote db"
-                cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
-for f in \$(cat $FILEMAPDB |cut -d : -f2);do
-    sort -g \$f | cut -d ',' -f1
-done | tail -n 1
-_EOCMD
-                scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
-                LASTBUCKID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
-                if [ "$LASTBUCKID" -lt "$BUCKETNUM" ];then
-                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is higher so GO!"
-                    DBLATEST="${BUCKNAME}"
-                    CHKERR=1
-                else
-                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is LOWER or equal so.. no way!"
-                fi
+                CHKERR=1
             else
                 if [ "$BT" == "HOT" ];then
                     ORIGIN=$(echo "$STATE" | cut -d "," -f 4)
@@ -1557,20 +1583,8 @@ _EOCMD
             ;;
             1)
             BUCKETNUM=$(F_GETBUCKNUM "$BUCKNAME")
-            cat > /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd << _EOCMD
-for f in \$(cat $FILEMAPDB |cut -d : -f2);do
-    sort -g \$f | cut -d ',' -f1
-done | tail -n 1
-_EOCMD
-            scp -c $SCPCIPHER -o Compression=no /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd ${CSVR}:/tmp/
-            LASTBUCKID=$(ssh -T -c $SCPCIPHER -o Compression=no -x ${CSVR} "bash /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd; rm /tmp/.rsyncix_${LHOST}_${IXNAME}_${BT}_cmd")
-            if [ "$LASTBUCKID" -lt "$BUCKETNUM" ];then
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is higher so GO!"
-                CHKERR=1
-            else
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: last bucket id: $LASTBUCKID, I want $BUCKETNUM which is LOWER or equal so.. no way!"
-                CHKERR=0
-            fi
+            F_LOG "$FUNCNAME: bucket DB empty, so go go go!"
+            CHKERR=1
             ;;
             *)
             F_LOG "$FUNCNAME: unknown return state ($CHKERR)"
@@ -1738,6 +1752,7 @@ F_GENBUCKNUM(){
     IXNAME="$4"
     OBUCKETNAME="$5"
     unset NEWHOTB
+    REMBID="${BUCKETIDPATH}/${IXNAME}.bid"
     
     # parsing bucket type
     BT=$(F_BUCKETTYPE "$OBUCKETNAME")
@@ -1755,9 +1770,9 @@ F_GENBUCKNUM(){
     else
         # check first if we need to generate a bucket name or using one from the DB!
         MAPBUCKET=$(F_LOCALFISHBUCKET "check" "$DBTYPE" "$IXNAME" "$OBUCKETNAME")
-        LASTERR=$?
-        if [ "$LASTERR" -eq 0 ];then
-            GUIDBUCKET="$MAPBUCKET"
+        MAPERR=$?
+        if [ "$MAPERR" -eq 0 ];then
+            BUCKETNAME="$MAPBUCKET"
             [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: local bucket mapping found ..."
             ## check for corrupted remote DB (i.e missing entry) 
             #NEWDB=$(F_REMOTEFISHBUCKET check "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME")
@@ -1775,7 +1790,10 @@ F_GENBUCKNUM(){
             #    F_LOG "$FUNCNAME: SKIPPING processing $GUIDBUCKET as it was synced previously and is NOT a HOT bucket."
             #    return 1
             #fi
-        else
+
+            # skip syncing as long as this is not a hot bucket
+            [ "$BT" != "HOT" ] && return 1
+       else
             [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: no local bucket mapping found."
             # GUID check/replacement
             if [ "$REMOTEGUID" != "REMOVE" ] ;then
@@ -1788,77 +1806,63 @@ F_GENBUCKNUM(){
                 [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will not touch GUID $LOCALGUID from bucketname"
                 GUIDBUCKET="${OBUCKETNAME}"
             fi
-        fi
-        # 2) F_REMOTESYNCDB lock server bucketpath
-        F_REMOTESYNCDB lock "${REMSRV}" "${BUCKPATH}"
-        LOCKERR=$?
-        READD=0
-        if [ $LOCKERR -eq 0 ];then
-            # 3) F_REMOTEFISHBUCKET check server bucketpath index originalbucket
-            NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$GUIDBUCKET" "$BT")
-            LASTERR=$?
-            # when LASTERR 0: found, when 1 or NEWDB empty: not found, when 5 no origin, when 6 origin=me
-            if [ -z "$NEWDB" ];then
-                # bucket name does not exist remotely so we can use the original one
-                BUCKETNAME="$GUIDBUCKET"
-                LASTERR=0
-                READD=1
-#            elif [ "$BT" == "HOT" ];then
-#                READD=0
-#                [ $LASTERR -eq 1 ] && READD=1
-#                BUCKETNAME="$GUIDBUCKET"
-#                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: will sync existing remote path because of existing HOT bucket"
-#                LASTERR=0
-            elif [ $LASTERR -eq 0 ]&&[ "$BT" != "HOT" ];then
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: SKIPPING processing $GUIDBUCKET as it was synced previously and is NOT a HOT bucket."
-                F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
-                return 1
-            else
-                # 4) RESULT_3 + 1 (so becomes a generatedname)
-                NEWNUM=99
-                COUNTER=0
-                BUCKETNAME="$GUIDBUCKET"
-                # skip gen bucket name when hot and we are the origin of that bucket
-                if [ "$BT" == "HOT" ] && [ $LASTERR -eq 5 -o $LASTERR -eq 6 ];then
-                    NEWNUM=1
-                else
-                    while [ "$NEWNUM" -ne 1 ] && [ $COUNTER -lt 5000 ];do
-                        if [ "$NEWNUM" -ne 99 ];then
-                            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: trying to generate a new bucket number.."
-                            NBUCKETNUM=$(F_GETBUCKNUM "$NEWDB")
-                            GENNUM=$(($NBUCKETNUM + 1))
-                            BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${GENNUM}/g")
-                        fi
-                        NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$BUCKETNAME" "$BT")
-                        NEWNUM=$?
-                        [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME checking ended with errcode: $NEWNUM"
-                        COUNTER=$((COUNTER + 1))
-                    done
-                    LASTERR=$?
-                    [ $COUNTER -gt 1000 ] \
-                        && F_LOG "$FUNCNAME: FATAL: giving up to find a new bucket number!!! Last generated result was: $BUCKETNAME" \
-                        && F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}" \
-                        && return 9
-                fi
-            fi
-            if [ $LASTERR -eq 0 ]||[ $LASTERR -eq 5 ];then
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME"
-                # 6) F_REMOTEFISHBUCKET add server bucketpath index generatedname
-                F_REMOTEFISHBUCKET add "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME" "$BT"
+ 
+            # 2) F_REMOTESYNCDB lock server bucketpath
+            F_REMOTESYNCDB lock "${REMSRV}" "${BUCKPATH}"
+            LOCKERR=$?
+            READD=0
+            if [ $LOCKERR -eq 0 ];then
+                # 3) F_REMOTEFISHBUCKET check server bucketpath index originalbucket
+                NEWDB=$(F_REMOTEFISHBUCKET check ${REMSRV} "${BUCKPATH}" "$IXNAME" "$GUIDBUCKET" "$BT")
                 LASTERR=$?
-                if [ $LASTERR -ne 0 ];then
-                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: ERROR while adding bucket $BUCKETNAME to REMOTE fishbucket"
+                # when LASTERR 0: found, when 1 or NEWDB empty: not found, when 5 no origin, when 6 origin=me
+                if [ -z "$NEWDB" ];then
+                    # bucket name does not exist remotely so we might can use the original one - check valid bid first
+                    VALIDBID=$(F_GETSETREMOTEBID "${REMSRV}" "$REMBID" "$CBUCKETNUM")
+                    BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${VALIDBID}/g")
+                    LASTERR=0
+                    READD=1
+                elif [ $LASTERR -eq 0 ]&&[ "$BT" != "HOT" ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: SKIPPING processing $GUIDBUCKET as it was synced previously and is NOT a HOT bucket."
+                    F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
+                    return 1
+                else
+                    # 4) RESULT_3 + 1 (so becomes a generatedname)
+                    NEWNUM=99
+                    COUNTER=0
+                    BUCKETNAME="$GUIDBUCKET"
+                    # skip gen bucket name when hot and we are the origin of that bucket
+                    if [ "$BT" == "HOT" ] && [ $LASTERR -eq 5 -o $LASTERR -eq 6 ];then
+                        [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME: skipping gen as this is a hot bucked which we will re-sync"
+                    else
+                        VALIDBID=$(F_GETSETREMOTEBID "${CSVR}" "$REMBID" "$BUCKETNUM")
+                        BUCKETNAME=$(echo "$GUIDBUCKET" | sed "s/_${CBUCKETNUM}/_${VALIDBID}/g")
+                        LASTERR=$?
+                        [ "$DEBUG" -eq 1 ] && F_LOG "$FUNCNAME: BID before: ${CBUCKETNUM}, after: ${VALIDBID}"
+                        [ $LASTERR -ne 0 ] \
+                            && F_LOG "$FUNCNAME: FATAL: error occured while finding a new bucket number!!! Last generated result was: $BUCKETNAME" \
+                            && F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}" \
+                            && return 9
+                    fi
                 fi
-            elif [ $LASTERR -eq 6 ];then
-                F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME and skip adding it to REMOTE fishbucket"
+                if [ $LASTERR -eq 0 ]||[ $LASTERR -eq 5 ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME"
+                    # 6) F_REMOTEFISHBUCKET add server bucketpath index generatedname
+                    F_REMOTEFISHBUCKET add "${REMSRV}" "${BUCKPATH}" "$IXNAME" "$BUCKETNAME" "$BT"
+                    LASTERR=$?
+                    if [ $LASTERR -ne 0 ];then
+                        [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: ERROR while adding bucket $BUCKETNAME to REMOTE fishbucket"
+                    fi
+                elif [ $LASTERR -eq 6 ];then
+                    F_LOG "$FUNCNAME: we will use bucket name: $BUCKETNAME and skip adding it to REMOTE fishbucket"
+                fi
+                # 7) F_REMOTESYNCDB unlock server bucketpath
+                F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
+                LASTERR=$?
+            else
+                F_LOG "$FUNCNAME: FATAL: cannot lock remote DB"
             fi
-            # 7) F_REMOTESYNCDB unlock server bucketpath
-            F_REMOTESYNCDB unlock "${REMSRV}" "${BUCKPATH}"
-            LASTERR=$?
-        else
-            F_LOG "$FUNCNAME: FATAL: cannot lock remote DB"
         fi
-
         [ -z "$BUCKETNAME" ] && F_LOG "$FUNCNAME: FATAL: new BUCKETNAME is empty!" && return 5
         [ $LASTERR -eq 0 ] && echo "$BUCKETNAME"
     fi
