@@ -20,7 +20,7 @@
 # Author & Support:     Thomas Fischer <mail@sedi.one>
 # Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
 #
-VERSION="6.0.28"
+VERSION="6.0.29"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -2113,7 +2113,12 @@ F_RSYNC(){
                             BUCKETCOUNT=$(echo "$BUCKETLIST" | wc -l)
                         ;;
                         db|colddb)
-                            BUCKETLIST=$(for f in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' | grep -vf <(printf "$(cat $FISHBUCKET)"));do F_CHECKBUCKTIME "$f";done)
+                            if [ -z "$SYNCAFTER" ] && [ -z "$SYNCBEFORE" ];then
+                                # we want to sync everything so skip any bucket time checks
+                                BUCKETLIST=$(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' | grep -vf <(printf "$(cat $FISHBUCKET)"))
+                            else
+                                BUCKETLIST=$(for f in $(find $TYPESRCDIR -maxdepth 1 -mindepth 1 -type d -name 'db_*' | grep -vf <(printf "$(cat $FISHBUCKET)"));do F_CHECKBUCKTIME "$f";done)
+                            fi
                             BUCKETCOUNT=$(echo "$BUCKETLIST" | wc -l)
                         ;;
                         *)  BUCKETLIST=0; BUCKETCOUNT=0; F_LOG "FATAL: no valid DBTYPE specified: $DBTYPE" ;;
