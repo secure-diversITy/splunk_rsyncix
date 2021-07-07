@@ -20,7 +20,7 @@
 # Author & Support:     Thomas Fischer <mail@sedi.one>
 # Copyright:            2017-2021 Thomas Fischer <mail@sedi.one>
 #
-VERSION="6.0.26"
+VERSION="6.0.28"
 ###################################################################################################################################
 #
 ### who am I ?
@@ -821,7 +821,7 @@ F_HELPSYNC(){
                                     or in other words: OLDEST event you want to sync - as date+time
                                     Format: "YYYY-MM-DD hh:mm:ss"
 
-                        before: 0|all|now|<123>days|<full date + time>
+                        before: 0|all|now|<123>days|<date>
                                 0|all|now:    
                                     no end time (i.e sync until now - especially useful when using the sync in never-ending mode)
                                     ignored when index-type = hot.
@@ -831,10 +831,10 @@ F_HELPSYNC(){
                                     or in other words: NEWEST event you want to sync - in days
                                     Format: "123days"
 
-                               <full date + time>:
-                                    date & time when the sync should end (not 100% exact).
-                                    or in other words: NEWEST event you want to sync - as date+time
-                                    Format: "YYYY-MM-DD hh:mm:ss"
+                               <date>:
+                                    date when the sync should end (not 100% exact).
+                                    or in other words: NEWEST event you want to sync - as date
+                                    Format: "YYYY-MM-DD"
 
                         priority: 1-3 (NOTE: NOT IMPLEMENTED YET!)
                                   1: index will run in a fully dedicated process to sync as fast as possible
@@ -1696,27 +1696,36 @@ F_CHECKBUCKTIME(){
     fi
 
     PRBUCK=0
-    if [ ! -z "$SYNCAFTER" ];then
-        if [ "$SYNCAFTER" -le "$BUCKETEND" ];then
-            if [ "$SYNCAFTER" -ge "$BUCKETSTART" ];then
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range $BUCKETSTART->$BUCKETEND"
-                PRBUCK=1
+    if [ ! -z "$SYNCBEFORE" ];then
+        if [ "$BUCKETEND" -le "$SYNCBEFORE" ];then
+            if [ ! -z "$SYNCAFTER" ];then
+                if [ "$BUCKETSTART" -ge "$SYNCAFTER" ];then
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range ($BUCKETSTART -ge $SYNCAFTER)"
+                    PRBUCK=1
+                else
+                    [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($BUCKETSTART not -ge $SYNCAFTER)"
+                    return 2
+                fi
             else
-                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($SYNCAFTER not -ge $BUCKETSTART)"
-                return 2
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range ($BUCKETEND -le $SYNCBEFORE and no SYNCAFTER value defined)"
+                PRBUCK=1
             fi
         else
-            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($SYNCAFTER not -le $BUCKETEND)"
+            [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($BUCKETEND not -le $SYNCBEFORE)"
             return 2
         fi
     else
-        if [ ! -z "$SYNCBEFORE" ];then
-            [ "$BUCKETEND" -le "$SYNCBEFORE" ] || return 2
+        if [ ! -z "$SYNCAFTER" ];then
+            if [ "$BUCKETSTART" -ge "$SYNCAFTER" ];then
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range ($BUCKETSTART -ge $SYNCAFTER and no SYNCBEFORE value defined)"
+                PRBUCK=1
+            else
+                [ $DEBUG -eq 1 ] && F_LOG "$FUNCNAME: Bucket is NOT within time range ($BUCKETSTART not -ge $SYNCAFTER)"
+                return 2
+            fi
         fi
-        PRBUCK=1
     fi
     [ $DEBUG -eq 1 ] && [ "$PRBUCK" -eq 1 ] && F_LOG "$FUNCNAME: Bucket is within time range"
-
     [ "$PRBUCK" -eq 1 ] && echo "$FULLBUCK"
 }
 
@@ -2505,10 +2514,11 @@ F_SYNCJOBS(){
             case $MAPAFTER in
                 all|0) unset SYNCAFTER ;;
                 *days)
-                SYNCAFTER=$(date --date="-${MAPAFTER}" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
+                SYNCAFTER=$(date --date="-${MAPAFTER} -1 month" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
                 ;;
                 *)
-                SYNCAFTER=$(date --date "${MAPAFTER/_/ }" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
+                MAPDATEONLY=$(date --date="-${MAPAFTER/_/ }" +%F)
+                SYNCAFTER=$(date --date "${MAPDATEONLY} -1 month" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCAFTER (${SYNCAFTER})"
                 ;;
             esac
 
@@ -2516,10 +2526,11 @@ F_SYNCJOBS(){
             case $MAPBEFORE in
                 all|0|now) unset SYNCBEFORE ;;
                 *days)
-                SYNCBEFORE=$(date --date="-${MAPBEFORE}" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
+                SYNCBEFORE=$(date --date="-${MAPBEFORE} +1 month" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
                 ;;
                 *)
-                SYNCBEFORE=$(date --date "${MAPBEFORE/_/ }" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
+                MAPDATEONLY=$(date --date="-${MAPBEFORE/_/ }" +%F)
+                SYNCBEFORE=$(date --date "${MAPDATEONLY} +1 month" +%s); [ $DEBUG -eq 1 ] && F_LOG "Setting SYNCBEFORE (${SYNCBEFORE})"
                 ;;
             esac
 
